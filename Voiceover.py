@@ -9,6 +9,8 @@ from tkinter import ttk, filedialog
 from tkinterdnd2 import TkinterDnD, DND_FILES
 import winreg
 import ctypes
+import concurrent.futures
+from concurrent.futures import ThreadPoolExecutor
 
 def resource_path(relative_path):
     """ Получает корректный путь для ресурсов в exe и dev режиме """
@@ -90,7 +92,7 @@ class ToolTip:
 class MergeApp(TkinterDnD.Tk):
     def __init__(self):
         super().__init__()
-        self.version = "1.001"
+        self.version = "1.010"
         self.title(f"Track-Packer - [{self.version}]")
         self.animation_phases = ['⏳', '⌛']
         self.animation_index = 0
@@ -332,16 +334,15 @@ class MergeApp(TkinterDnD.Tk):
         )
         self.progress_label.place(in_=self.progress_bar, relx=0.5, rely=0.5, anchor="center")
 
-        # Нижняя строка с Backup и Version (уменьшен отступ)
+
         bottom_frame = ttk.Frame(main_frame)
-        bottom_frame.grid(row=5, column=0, sticky="ew", pady=1)  # Уменьшил pady с 2 до 1
+        bottom_frame.grid(row=5, column=0, sticky="ew", pady=1)
         
-        # Исправлено: используем bottom_frame вместо custom_frame
-        ttk.Checkbutton(bottom_frame, text="Backup", variable=self.backup_files).pack(side=tk.LEFT, padx=5)  # Исправлено на bottom_frame
-        version_label = ttk.Label(bottom_frame, text=f"Version: {self.version}", anchor="e")  # Исправлено на bottom_frame
+
+        ttk.Checkbutton(bottom_frame, text="Backup", variable=self.backup_files).pack(side=tk.LEFT, padx=5) 
+        version_label = ttk.Label(bottom_frame, text=f"Version: {self.version}", anchor="e")
         version_label.pack(side=tk.RIGHT, padx=5)
 
-        # Теги для цветов текста
         self.tree.tag_configure('pending', foreground='gray')
         self.tree.tag_configure('processing', foreground='orange')
         self.tree.tag_configure('done', foreground='green')
@@ -356,8 +357,8 @@ class MergeApp(TkinterDnD.Tk):
     def create_status_image(self, color, symbol):
         """Создает изображение для статуса"""
         img = tk.PhotoImage(width=24, height=24)
-        img.put(color, to=(0,0,23,23))  # Заливка фона
-        img.put('white', (symbol,), (12,12))  # Символ в центре
+        img.put(color, to=(0,0,23,23))
+        img.put('white', (symbol,), (12,12))
         return img
 
     def animate_processing_status(self, base):
@@ -802,8 +803,8 @@ class MergeApp(TkinterDnD.Tk):
             '-map', '0:v:0',
             '-map', '[a_mix]',
             '-c:v', 'copy',
-            '-c:a', 'aac',
-            '-strict', 'experimental',
+            '-c:a', 'aac', '-aac_coder twoloop',
+            '-b:a 192k',
             '-y', f'"{output}"'
         ]
 
@@ -833,11 +834,10 @@ class MergeApp(TkinterDnD.Tk):
             total = sum(1 for base, pair in self.file_pairs.items() 
                         if pair['video'] and self.file_status.get(base, 'pending') == 'pending')
             processed = 0
-            
-            for base, pair in self.file_pairs.items():
-                if not pair['video'] or self.file_status.get(base, 'pending') != 'pending':
-                    continue
+            lock = threading.Lock()
 
+            def process_file(base, pair):
+                nonlocal processed
                 try:
                     self.update_item_status(base, 'processing')
                     video_path = pair['video']
@@ -845,11 +845,13 @@ class MergeApp(TkinterDnD.Tk):
                     name, ext = os.path.splitext(os.path.basename(video_path))
                     output_path = os.path.join(video_dir, f"{name}_RUS.mkv")
 
+                    # Обработка файла
                     if pair['audio']:
                         self.run_ffmpeg_external(pair['video'], pair['audio'], output_path)
                     else:
                         self.run_ffmpeg_embedded(pair['video'], output_path, pair.get('track_info', []))
 
+                    # Обновление статуса
                     self.update_item_status(base, 'done')
                     self.created_files.append(pair['video'])
                     if pair['audio']:
@@ -860,12 +862,28 @@ class MergeApp(TkinterDnD.Tk):
                     self.update_item_status(base, 'error')
                     self.skipped_files.append(pair['video'])
 
-                processed += 1
-                progress = (processed / total) * 100 if total > 0 else 100
-                self.after(0, lambda p=progress, pr=processed, t=total: [
-                    self.progress.set(p),
-                    self.progress_label.config(text=f"{pr}/{t}")  # Обновляем "X/Y"
-                ])
+                # Обновление прогресса
+                with lock:
+                    processed += 1
+                    progress = (processed / total) * 100 if total > 0 else 100
+                    self.after(0, lambda p=progress, pr=processed, t=total: [
+                        self.progress.set(p),
+                        self.progress_label.config(text=f"{pr}/{t}")
+                    ])
+
+            # Запуск обработки в пуле потоков
+            with ThreadPoolExecutor() as executor:
+                futures = []
+                for base, pair in self.file_pairs.items():
+                    if pair['video'] and self.file_status.get(base, 'pending') == 'pending':
+                        futures.append(executor.submit(process_file, base, pair))
+
+                # Ожидание завершения всех задач
+                for future in concurrent.futures.as_completed(futures):
+                    try:
+                        future.result()
+                    except Exception as e:
+                        print(f"Ошибка в потоке: {e}")
 
             self._finalize_processing()
 
@@ -913,24 +931,19 @@ class MergeApp(TkinterDnD.Tk):
         }.get(status, '')
 
     def run_ffmpeg_embedded(self, video, output):
-        # Проверка количества и языка аудио дорожек
         track_count, track_info = self.check_audio_tracks(video)
         if track_count <= 1:
             raise Exception("Недостаточно аудио дорожек для склейки")
         
-        # Определяем громкость
-        orig_vol = self.orig_volume.get() / 100  # Оригинальная дорожка (английская)
-        new_vol = self.new_volume.get() / 100   # Новая дорожка (русская)
+        orig_vol = self.orig_volume.get() / 100
+        new_vol = self.new_volume.get() / 100
         
-        # Определяем индексы дорожек
-        original_track = 1  # Английская дорожка (Stream #0:2)
-        translation_track = 0  # Русская дорожка (Stream #0:1)
+        original_track = 1
+        translation_track = 0
         
-        # Если пользователь хочет инвертировать дорожки
         if self.invert_tracks.get():
             original_track, translation_track = translation_track, original_track
         
-        # Команда FFmpeg для смешивания дорожек
         cmd = [
             'ffmpeg', '-i', video,
             '-filter_complex',
@@ -1030,13 +1043,14 @@ class MergeApp(TkinterDnD.Tk):
         
         # Команда FFmpeg
         cmd = [
-            ffmpeg_path, '-i', f'"{video}"',
+            ffmpeg_path, 
+            '-i', f'"{video}"',
             '-filter_complex', filter_complex,
             '-map', '0:v:0',
             '-map', '[a_mix]',
             '-c:v', 'copy',
-            '-c:a', 'aac',
-            '-strict', 'experimental',
+            '-c:a', 'aac', '-aac_coder twoloop',
+            '-b:a 192k',  # Фиксированный битрейт
             '-y', f'"{output}"'
         ]
         
