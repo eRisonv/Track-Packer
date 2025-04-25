@@ -1,4 +1,4 @@
-![image](https://github.com/user-attachments/assets/5bcefb75-1f02-4278-ba78-f7d7399549f8)
+![image](https://github.com/user-attachments/assets/7be97579-004e-4f6a-900c-158d4cd02eae)
 
 Пакетный склейщик аудиодорожек.
 
