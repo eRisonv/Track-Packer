@@ -2,6 +2,7 @@ import os
 import sys
 import re
 import shutil
+import signal
 import subprocess
 import threading
 import tkinter as tk
@@ -11,17 +12,16 @@ import winreg
 import ctypes
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
+import time
 
 def resource_path(relative_path):
     """ Получает корректный путь для ресурсов в exe и dev режиме """
     if hasattr(sys, '_MEIPASS'):
-        # В скомпилированном виде используем директорию PyInstaller
         return os.path.join(sys._MEIPASS, relative_path)
     else:
-        # В режиме разработки используем директорию скрипта
         script_dir = os.path.dirname(os.path.abspath(__file__))
         return os.path.join(script_dir, relative_path)
-    
+   
 def save_to_registry(key_name, value):
     try:
         reg_key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\MergeApp")
@@ -58,30 +58,25 @@ class ToolTip:
         self.widget = widget
         self.text = text
         self.tooltip = None
-        self.delay = 1000  # Задержка в миллисекундах (2 секунды)
+        self.delay = 1000
         self.timer_id = None
         self.widget.bind("<Enter>", self.schedule_tooltip)
         self.widget.bind("<Leave>", self.hide_tooltip)
 
     def schedule_tooltip(self, event=None):
-        """Запланировать показ тултипа через указанное время."""
         self.timer_id = self.widget.after(self.delay, self.show_tooltip)
 
     def show_tooltip(self, event=None):
-        """Показать тултип."""
         x, y, _, _ = self.widget.bbox("insert")
         x += self.widget.winfo_rootx() + 25
         y += self.widget.winfo_rooty() + 25
-
         self.tooltip = tk.Toplevel(self.widget)
         self.tooltip.wm_overrideredirect(True)
         self.tooltip.wm_geometry(f"+{x}+{y}")
-
         label = tk.Label(self.tooltip, text=self.text, background="#ffffe0", relief="solid", borderwidth=1)
         label.pack()
 
     def hide_tooltip(self, event=None):
-        """Скрыть тултип и отменить запланированный показ."""
         if self.timer_id:
             self.widget.after_cancel(self.timer_id)
             self.timer_id = None
@@ -92,68 +87,80 @@ class ToolTip:
 class MergeApp(TkinterDnD.Tk):
     def __init__(self):
         super().__init__()
-        self.version = "1.010"
-        self.title(f"Track-Packer - [{self.version}]")
+        try:
+            self.iconbitmap(resource_path('hey.ico'))
+        except:
+            pass
+        self.version = "1.1"
+        self.title(f"Track-Packer")
         self.animation_phases = ['⏳', '⌛']
+        self.show_console = tk.BooleanVar(value=False)
+        self.preview_process = None
+        self.is_preview_playing = False
+        self.ffmpeg_process = None
+        self.ffplay_process = None
+        self.preview_button = None
+        signal.signal(signal.SIGINT, self.handle_sigint)
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.play_icon_text = "▶"
+        self.pause_icon_text = "⏸"
         self.animation_index = 0
         self.after_id = None
-        minimize_console()
-        self.title("Track-Packer")
+        self.stop_event = None
+        self.active_ffmpeg_processes = []
         self.geometry("370x520")
         self.minsize(370, 520)
-        
-        # Центрируем окно
         self.attributes('-topmost', 1)
         self.after(2000, lambda: self.attributes('-topmost', 0))
         self.center_window()
-
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
+        self.toggle_console()
         
         self.status = tk.StringVar()
         self.progress = tk.DoubleVar()
         self.file_pairs = {}
         self.created_files = []
         self.skipped_files = []
-        self.orig_volume = tk.DoubleVar(value=load_from_registry("orig_volume", 5))
-        self.new_volume = tk.DoubleVar(value=load_from_registry("new_volume", 100))
+        self.orig_volume = tk.DoubleVar(value=5)
+        self.new_volume = tk.DoubleVar(value=100)
         self.remove_source = tk.BooleanVar(value=False)
         self.invert_tracks = tk.BooleanVar(value=False)
         self.is_processing = False
         self.backup_files = tk.BooleanVar(value=True)
         self.file_status = {}
-
         self.create_widgets()
         self.setup_volume_labels()
         self.setup_dnd()
 
+    def handle_sigint(self, signum, frame):
+        self.on_close()
+
+    def on_close(self):
+        """Вызывается при закрытии окна"""
+        self.stop_preview()
+        self.stop_processing()
+        self.destroy()
+
     def start_animation(self):
-        """Запускает анимацию статуса обработки с эффектом пересыпания песка"""
         if self.is_processing:
-            # Фазы анимации с фиксированной длиной (дополнены пробелами)
             self.animation_phases = ['⏳', '⏳', '⏳', '⌛', '⌛', '⌛']
             self.animation_index = 0
             if not hasattr(self, 'after_id') or self.after_id is None:
                 self.update_animation()
 
     def update_animation(self):
-        """Обновляет анимацию для элементов в статусе processing с эффектом пересыпания"""
         if not self.is_processing:
             if hasattr(self, 'after_id') and self.after_id:
                 self.after_cancel(self.after_id)
                 self.after_id = None
             return
-
-        # Проходим по всем элементам в дереве
         for item in self.tree.get_children():
             if self.tree.item(item, 'tags')[0] == 'processing':
                 values = self.tree.item(item, 'values')
-                # Обновляем символ анимации с фиксированной длиной
                 new_symbol = self.animation_phases[self.animation_index]
                 new_values = (new_symbol, values[1], values[2])
                 self.tree.item(item, values=new_values)
-
-        # Переходим к следующей фазе анимации
         self.animation_index = (self.animation_index + 1) % len(self.animation_phases)
         self.after_id = self.after(300, self.update_animation)
             
@@ -162,95 +169,75 @@ class MergeApp(TkinterDnD.Tk):
         self.dnd_bind('<<Drop>>', self.on_drop)
  
     def _show_track_details(self):
-        """
-        Показывает диалог с детальной информацией о распознанных аудиодорожках
-        """
         details_window = tk.Toplevel(self)
         details_window.title("Детали аудиодорожек")
         details_window.geometry("600x400")
-        details_window.grab_set()  # Модальное окно
-        
-        # Заголовок
+        details_window.grab_set()
         ttk.Label(details_window, text="Распознанные аудиодорожки в файлах", 
                  font=('Arial', 12, 'bold')).pack(pady=10)
-        
-        # Текстовое поле с информацией
         text_area = tk.Text(details_window, wrap=tk.WORD, width=70, height=15)
         text_area.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-        
-        # Полоса прокрутки
         scrollbar = ttk.Scrollbar(text_area, command=text_area.yview)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         text_area.config(yscrollcommand=scrollbar.set)
-        
-        # Вставляем информацию о дорожках
         for base, pair in self.file_pairs.items():
             if pair.get('video') and pair.get('track_info'):
                 video_name = os.path.basename(pair['video'])
                 text_area.insert(tk.END, f"\nФайл: {video_name}\n", "header")
-                
                 for track in pair.get('track_info', []):
                     language = track.get('language', 'неизвестно').upper()
-                    index = track.get('track_index', -1)
+                    index = track.get('track_index')
                     info = track.get('full_info', '')
-                    
-                    # Определяем роль дорожки
                     role = ""
                     if language == "ENG":
                         role = "(оригинал)"
                     elif language == "RUS":
                         role = "(перевод)"
-                    
                     text_area.insert(tk.END, f"  Дорожка #{index}: {language} {role}\n")
                     text_area.insert(tk.END, f"    {info}\n", "info")
-        
-        # Стили текста
         text_area.tag_configure("header", font=('Arial', 10, 'bold'))
         text_area.tag_configure("info", foreground="gray")
-        
-        text_area.config(state=tk.DISABLED)  # Только для чтения
-        
-        # Кнопка закрытия
+        text_area.config(state=tk.DISABLED)
         ttk.Button(details_window, text="ОК", command=details_window.destroy).pack(pady=10)
  
     def center_window(self):
-        """Размещает окно по центру экрана."""
-        self.update_idletasks()  # Обновляем геометрию окна
-        width = self.winfo_width()  # Ширина окна
-        height = self.winfo_height()  # Высота окна
-        screen_width = self.winfo_screenwidth()  # Ширина экрана
-        screen_height = self.winfo_screenheight()  # Высота экрана
-
-        # Вычисляем координаты для размещения окна по центру
+        self.update_idletasks()
+        width = self.winfo_width()
+        height = self.winfo_height()
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
         x = (screen_width // 2) - (width // 2)
         y = (screen_height // 2) - (height // 2)
-
-        # Устанавливаем положение окна
         self.geometry(f"+{x}+{y}")
  
     def on_enter_merge_button(self, event):
-        """Обработчик наведения курсора на кнопку 'Склеить'."""
-        self.merge_button.config(bg="#45a049")  # Изменяем цвет фона на более темный зеленый
+        if self.merge_button['state'] == 'normal':
+            self.merge_button.config(bg="#45a049" if self.merge_button['text'] == "GO" else "#FF4500")
 
     def on_leave_merge_button(self, event):
-        """Обработчик ухода курсора с кнопки 'Склеить'."""
-        self.merge_button.config(bg="#4CAF50")  # Возвращаем исходный цвет фона
- 
+        if self.merge_button['state'] == 'normal':
+            self.merge_button.config(bg="#4CAF50" if self.merge_button['text'] == "GO" else "#FF6347")
+
+    def update_merge_button_state(self):
+        if not self.file_pairs:
+            self.merge_button.config(state='disabled', bg="#d3d3d3", text="GO")
+        else:
+            self.merge_button.config(state='normal', bg="#4CAF50", text="GO")
+
     def create_widgets(self):
         main_frame = ttk.Frame(self)
         main_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=2)
         main_frame.grid_rowconfigure(6, weight=1)
         main_frame.grid_columnconfigure(0, weight=1)
+        main_frame.grid_columnconfigure(1, weight=0)
 
-        # Область перетаскивания
         self.drop_area = tk.Canvas(main_frame, bg="#e8f4ff", bd=2, relief=tk.RIDGE, height=100)
-        self.drop_area.grid(row=0, column=0, sticky="nsew", pady=2)
+        self.drop_area.grid(row=0, column=0, columnspan=2, sticky="nsew", pady=2)
         self.drop_area.bind("<Configure>", self.update_drop_area_text)
         self.drop_area.bind("<Button-1>", self.on_click)
 
-        # Таблица файлов
         file_frame = ttk.Frame(main_frame)
-        file_frame.grid(row=1, column=0, sticky="nsew", pady=2)
+        file_frame.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=2)
         file_frame.grid_columnconfigure(0, weight=1)
         file_frame.grid_rowconfigure(0, weight=1)
 
@@ -269,29 +256,32 @@ class MergeApp(TkinterDnD.Tk):
         vsb.grid(row=0, column=1, sticky="ns")
         hsb.grid(row=1, column=0, sticky="ew")
 
-        # Панель для кнопок
+        self.tree.bind("<Delete>", self.delete_selected_items)
+
         button_frame = ttk.Frame(main_frame)
-        button_frame.grid(row=2, column=0, sticky="ew", pady=2)
+        button_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=2)
 
         invert_checkbox = ttk.Checkbutton(button_frame, text="Инвертировать дорожки",
                                           variable=self.invert_tracks)
         invert_checkbox.pack(side=tk.LEFT, padx=5)
         ToolTip(invert_checkbox, "Попробуй, если вдруг глушится не та дорожка.\nРаботает только с внутренними дорожками.")
 
-        self.clear_button = ttk.Button(button_frame, text="Очистить список",
+        spacer = ttk.Label(button_frame)
+        spacer.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        self.preview_button = ttk.Button(button_frame, text=self.play_icon_text, 
+                                        command=self.toggle_preview, width=3)
+        self.preview_button.pack(side=tk.RIGHT, padx=5)
+        ToolTip(self.preview_button, "Предпрослушать смесь аудио (30 секунд)")
+
+        self.clear_button = ttk.Button(button_frame, text="Очистить",
                                       command=self.clear_list)
-        self.clear_button.pack(side=tk.LEFT, padx=5)
+        self.clear_button.pack(side=tk.RIGHT, padx=5)
 
-        self.merge_button = tk.Button(button_frame, text="Склеить", bg="#4CAF50", fg="white",
-                                     command=self.process_files, relief=tk.FLAT, cursor="hand2")
-        self.merge_button.pack(side=tk.RIGHT, padx=5)
-        self.merge_button.bind("<Enter>", self.on_enter_merge_button)
-        self.merge_button.bind("<Leave>", self.on_leave_merge_button)
-
-        # Настройки громкости
         volume_frame = ttk.Frame(main_frame)
         volume_frame.grid(row=3, column=0, sticky="ew", pady=2)
-        
+        volume_frame.columnconfigure(1, weight=1)
+
         self.orig_frame = ttk.Frame(volume_frame)
         self.orig_frame.grid(row=0, column=0, sticky="ew")
         self.orig_frame.columnconfigure(1, weight=1)
@@ -310,9 +300,16 @@ class MergeApp(TkinterDnD.Tk):
         self.new_label = tk.Label(self.new_frame, text="100%", width=5)
         self.new_label.grid(row=0, column=2, padx=5, sticky='e')
 
-        # Статус-бар (уменьшен отступ от ползунков)
+        self.merge_button = tk.Button(main_frame, text="GO", bg="#4CAF50", fg="white",
+                                     command=self.toggle_processing, relief=tk.FLAT, cursor="hand2",
+                                     font=("Arial", 12, "bold"), width=8, height=2)
+        self.merge_button.grid(row=3, column=1, sticky="e", padx=(0, 5), pady=2)
+        self.merge_button.bind("<Enter>", self.on_enter_merge_button)
+        self.merge_button.bind("<Leave>", self.on_leave_merge_button)
+        self.update_merge_button_state()
+
         status_frame = ttk.Frame(main_frame)
-        status_frame.grid(row=4, column=0, sticky="ew", pady=(2, 1))  # Уменьшил нижний pady до 1
+        status_frame.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(2, 1))
         status_frame.columnconfigure(0, weight=1)
 
         self.done_label = ttk.Label(status_frame, text="", anchor="center")
@@ -334,20 +331,210 @@ class MergeApp(TkinterDnD.Tk):
         )
         self.progress_label.place(in_=self.progress_bar, relx=0.5, rely=0.5, anchor="center")
 
-
         bottom_frame = ttk.Frame(main_frame)
-        bottom_frame.grid(row=5, column=0, sticky="ew", pady=1)
-        
+        bottom_frame.grid(row=5, column=0, columnspan=2, sticky="ew", pady=1)
 
-        ttk.Checkbutton(bottom_frame, text="Backup", variable=self.backup_files).pack(side=tk.LEFT, padx=5) 
+        ttk.Checkbutton(bottom_frame, text="Backup", variable=self.backup_files).pack(side=tk.LEFT, padx=5)
+        ttk.Checkbutton(bottom_frame, text="Console", variable=self.show_console,
+                       command=self.toggle_console).pack(side=tk.LEFT, padx=5)
+        
         version_label = ttk.Label(bottom_frame, text=f"Version: {self.version}", anchor="e")
         version_label.pack(side=tk.RIGHT, padx=5)
 
         self.tree.tag_configure('pending', foreground='gray')
         self.tree.tag_configure('processing', foreground='orange')
         self.tree.tag_configure('done', foreground='green')
-        self.tree.tag_configure('error', foreground='red')    
+        self.tree.tag_configure('error', foreground='red')
+        self.tree.tag_configure('stopped', foreground='blue')
+
+    def minimize_console(self):
+        if not self.show_console.get():
+            return
+            
+        kernel32 = ctypes.WinDLL('kernel32')
+        user32 = ctypes.WinDLL('user32')
+        hwnd = kernel32.GetConsoleWindow()
+        if hwnd:
+            user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE = 6
+
+    def toggle_console(self):
+        kernel32 = ctypes.WinDLL('kernel32')
+        user32 = ctypes.WinDLL('user32')
+        hwnd = kernel32.GetConsoleWindow()
+        
+        if hwnd:
+            if self.show_console.get():
+                user32.ShowWindow(hwnd, 5)  # SW_SHOW = 5
+            else:
+                user32.ShowWindow(hwnd, 0)  # SW_HIDE = 0
+
+    def delete_selected_items(self, event=None):
+        selected_items = self.tree.selection()
+        if not selected_items:
+            return
+
+        # Удаляем выделенные элементы из file_pairs
+        for item in selected_items:
+            values = self.tree.item(item, 'values')
+            base = self.get_base_name(values[1])
+            if base in self.file_pairs:
+                del self.file_pairs[base]
+            if base in self.file_status:
+                del self.file_status[base]
+
+        # Обновляем отображение списка
+        self.update_treeview()
     
+    def toggle_preview(self):
+        if self.is_preview_playing:
+            self.stop_preview()
+        else:
+            self.start_preview()
+
+    def start_preview(self):
+        if self.is_preview_playing:
+            return
+
+        selected = self.tree.selection()
+        if not selected:
+            tk.messagebox.showwarning("Внимание", "Выберите файл из списка для предпрослушивания")
+            return
+
+        item = selected[0]
+        values = self.tree.item(item, 'values')
+        base = self.get_base_name(values[1])
+        pair = self.file_pairs.get(base)
+
+        if not pair or not pair.get('video'):
+            tk.messagebox.showerror("Ошибка", "Видео файл не найден")
+            return
+
+        video_path = pair['video']
+        audio_path = pair.get('audio')
+        orig_vol = self.orig_volume.get() / 100
+        new_vol = self.new_volume.get() / 100
+
+        try:
+            ffmpeg_path = resource_path("ffmpeg.exe")
+            ffplay_path = resource_path("ffplay.exe")
+
+            if audio_path:
+                # Case 1: External audio file provided
+                cmd = [
+                    ffmpeg_path,
+                    '-i', video_path,
+                    '-i', audio_path,
+                    '-filter_complex',
+                    f'[0:a]volume={orig_vol}[a0];[1:a]volume={new_vol}[a1];[a0][a1]amix=duration=shortest[a]',
+                    '-map', '[a]',
+                    '-t', '30',  # Limit to 30 seconds
+                    '-f', 'wav',
+                    '-'
+                ]
+            else:
+                # Case 2: Using internal audio tracks
+                track_info = pair.get('track_info', [])
+                if len(track_info) < 2:
+                    tk.messagebox.showerror("Ошибка", "Недостаточно дорожек для микса")
+                    return
+
+                # Find tracks by language or default to first two
+                eng_track = next((t for t in track_info if t['language'] == 'eng'), None)
+                rus_track = next((t for t in track_info if t['language'] == 'rus'), None)
+
+                if eng_track and rus_track:
+                    track1 = eng_track['audio_index']
+                    track2 = rus_track['audio_index']
+                else:
+                    # Default to first two tracks if languages not identified
+                    track1 = track_info[0]['audio_index']
+                    track2 = track_info[1]['audio_index']
+
+                # Handle track inversion
+                if self.invert_tracks.get():
+                    track1, track2 = track2, track1
+
+                cmd = [
+                    ffmpeg_path,
+                    '-i', video_path,
+                    '-filter_complex',
+                    f'[0:a:{track1}]volume={orig_vol}[a0];[0:a:{track2}]volume={new_vol}[a1];[a0][a1]amix=duration=shortest[a]',
+                    '-map', '[a]',
+                    '-t', '30',
+                    '-f', 'wav',
+                    '-'
+                ]
+
+            ffplay_cmd = [
+                ffplay_path,
+                '-nodisp',    # Hide window
+                '-autoexit',  # Close after finishing
+                '-'
+            ]
+
+            # Start processes
+            self.ffmpeg_process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                bufsize=0
+            )
+
+            self.ffplay_process = subprocess.Popen(
+                ffplay_cmd,
+                stdin=self.ffmpeg_process.stdout,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+
+            self.is_preview_playing = True
+            self.preview_button.config(text=self.pause_icon_text)  # Show pause icon
+
+            # Start monitoring in separate thread
+            threading.Thread(target=self.wait_for_preview, daemon=True).start()
+
+        except Exception as e:
+            tk.messagebox.showerror("Ошибка", f"Ошибка предпрослушивания: {str(e)}")
+            self.stop_preview()
+
+    def stop_preview(self):
+        """Останавливает текущее воспроизведение и убивает все связанные процессы"""
+        try:
+            if self.ffplay_process:
+                try:
+                    self.ffplay_process.terminate()
+                    self.ffplay_process.wait(timeout=1)
+                except (subprocess.TimeoutExpired, AttributeError):
+                    if hasattr(self.ffplay_process, 'pid'):
+                        os.kill(self.ffplay_process.pid, signal.SIGTERM)
+                finally:
+                    self.ffplay_process = None
+
+            if self.ffmpeg_process:
+                try:
+                    self.ffmpeg_process.terminate()
+                    self.ffmpeg_process.wait(timeout=1)
+                except (subprocess.TimeoutExpired, AttributeError):
+                    if hasattr(self.ffmpeg_process, 'pid'):
+                        os.kill(self.ffmpeg_process.pid, signal.SIGTERM)
+                finally:
+                    self.ffmpeg_process = None
+
+            self.is_preview_playing = False
+            if self.preview_button:
+                self.preview_button.config(text=self.play_icon_text)
+        except Exception as e:
+            print(f"Ошибка при остановке превью: {e}")
+
+    def wait_for_preview(self):
+        """Ожидает завершения воспроизведения и обновляет состояние."""
+        if self.ffplay_process:
+            self.ffplay_process.wait()
+        self.is_preview_playing = False
+        self.preview_button.config(text=self.play_icon_text)  # Показываем иконку воспроизведения
+        self.ffplay_process = None
+        self.ffmpeg_process = None
+ 
     def create_color_image(self, color):
         """Создает цветной квадрат 16x16 указанного цвета"""
         img = tk.PhotoImage(width=16, height=16)
@@ -382,27 +569,26 @@ class MergeApp(TkinterDnD.Tk):
 
     def check_audio_tracks(self, video_path):
         ffmpeg_path = resource_path("ffmpeg.exe")
-        cmd = [ffmpeg_path, '-i', f'"{video_path}"', '-hide_banner']
+        cmd = [ffmpeg_path, '-i', video_path, '-hide_banner']
+
         try:
             process = subprocess.Popen(
-                ' '.join(cmd),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE, 
                 universal_newlines=True,
-                encoding='utf-8',
-                errors='ignore'
+                encoding='utf-8',  
+                errors='ignore' 
             )
             
-            output_text = ""
-            while True:
-                line = process.stdout.readline()
-                if line == '' and process.poll() is not None:
-                    break
-                if line:
-                    output_text += line
-            
+            output_text = process.stderr.read()
+            process.wait()
+
+            if output_text is None:
+                output_text = ""
+
             audio_streams = []
-            audio_index = 0  # Счетчик для аудиопотоков
+            audio_index = 0
             for line in output_text.split('\n'):
                 if "Stream #" in line and "Audio:" in line:
                     stream_id = line.split('#')[1].split('[')[0].strip()
@@ -412,7 +598,6 @@ class MergeApp(TkinterDnD.Tk):
                     track_index_match = re.search(r'Stream #0:(\d+)', line)
                     track_index = int(track_index_match.group(1)) if track_index_match else -1
                     
-                    # Извлекаем количество каналов
                     parts = [p.strip() for p in line.split(',')]
                     channel_layout = parts[2] if len(parts) > 2 else "unknown"
                     
@@ -420,13 +605,14 @@ class MergeApp(TkinterDnD.Tk):
                         "stream_id": stream_id,
                         "language": lang,
                         "track_index": track_index,
-                        "audio_index": audio_index,  # Индекс среди аудиопотоков
+                        "audio_index": audio_index,
                         "full_info": line.strip(),
-                        "channel_layout": channel_layout  # mono, stereo и т.д.
+                        "channel_layout": channel_layout
                     })
                     audio_index += 1
             
             return len(audio_streams), audio_streams
+
         except Exception as e:
             print(f"Ошибка при проверке аудио дорожек: {e}")
             return 0, []
@@ -445,7 +631,7 @@ class MergeApp(TkinterDnD.Tk):
         self.drop_area.create_text(width // 2, height // 3, text="＋", 
                                  fill="#0078d4", font=('Arial', 48))
         self.drop_area.create_text(width // 2, height * 2 // 3, 
-                                 text="Перетащите файлы/папки в любое место\nили кликните сюда чтобы выбрать вручную",
+                                 text="Перетащите файлы/папки сюда\nили кликните в это место чтобы выбрать вручную.",
                                  fill="#666666", font=('Arial', 10), justify=tk.CENTER)
 
     def setup_volume_labels(self):
@@ -673,15 +859,9 @@ class MergeApp(TkinterDnD.Tk):
 
     def get_base_name(self, path):
         name = os.path.basename(path)
-        
-        name = re.sub(r'^\d+[_.]', '', name)
-        
-        name = re.sub(r'_(rus|eng)(?=\.[^.]+$)', '', name, flags=re.IGNORECASE)
-        
+        name = re.sub(r'^\d+_', '', name)  # Удаляем ведущие цифры, за которыми следует '_'
+        name = re.sub(r'_(rus|eng)(?=\.[^.]+$)', '', name, flags=re.IGNORECASE)  # Удаляем _rus или _eng перед расширением
         base_name = os.path.splitext(name)[0].lower()
-        
-        base_name = re.sub(r'[^a-z0-9]', '', base_name)
-        
         return base_name
 
     def update_treeview(self):
@@ -690,7 +870,6 @@ class MergeApp(TkinterDnD.Tk):
             if base in self.old_file_pairs and \
                self.file_pairs[base]['video'] == self.old_file_pairs[base]['video'] and \
                self.file_pairs[base].get('audio', None) == self.old_file_pairs[base].get('audio', None):
-                # Пара файлов не изменилась
                 status = self.file_status.get(base, 'pending')
                 video = os.path.basename(pair['video'])
                 if pair['audio']:
@@ -703,7 +882,6 @@ class MergeApp(TkinterDnD.Tk):
                     else:
                         audio = "None"
             else:
-                # Пара файлов изменилась или новая
                 status = None
                 video = os.path.basename(pair['video']) if pair['video'] else ""
                 if pair['video'] and pair['audio']:
@@ -722,13 +900,13 @@ class MergeApp(TkinterDnD.Tk):
                 else:
                     status = 'error'
                     audio = "None"
-            # Вставляем элемент со статусом
             self.tree.insert('', 'end', values=(self.status_text(status), video, audio), tags=(status,))
             self.file_status[base] = status
-        # Удаляем из file_status базы, которых нет в file_pairs
         for base in list(self.file_status.keys()):
             if base not in self.file_pairs:
                 del self.file_status[base]
+        # Обновляем состояние кнопки "GO" после изменения списка
+        self.update_merge_button_state()
             
     def get_track_language_info(self, track_info):
         if not track_info:
@@ -747,53 +925,46 @@ class MergeApp(TkinterDnD.Tk):
         self.tree.delete(*self.tree.get_children())
         self.created_files = []
         self.skipped_files = []
-        self.progress.set(0)  # Сброс прогресс-бара
-        self.progress_label.config(text="")  # Удаление текста прогресса (например, "2/10")
+        self.progress.set(0)
+        self.progress_label.config(text="")
+        # Обновляем состояние кнопки "GO" после очистки списка
+        self.update_merge_button_state()
     
-    def process_files(self):
-        if self.is_processing:
-            return
-        self.done_label.config(text="")  # Очищаем статус
+    def process_file(self, base, pair):
+        if self.stop_event.is_set():
+            return  # Не начинаем, если уже остановлено
+        try:
+            self.update_item_status(base, 'processing')
+            video_path = pair['video']
+            output_path = os.path.join(os.path.dirname(video_path), f"{os.path.splitext(os.path.basename(video_path))[0]}_RUS.mkv")
+            
+            # Запускаем FFmpeg и сохраняем процесс
+            if pair['audio']:
+                ffmpeg_process = self.run_ffmpeg_external(pair['video'], pair['audio'], output_path)
+            else:
+                ffmpeg_process = self.run_ffmpeg_embedded(pair['video'], output_path, pair.get('track_info', []))
 
-        has_error = False
-        error_file = None
-        
-        for item in self.tree.get_children():
-            status = self.tree.item(item, 'tags')[0]
-            values = self.tree.item(item, 'values')
-            if status == 'error':
-                has_error = True
-                error_file = values[1]
-                tk.messagebox.showerror(
-                    "Ошибка", 
-                    f"Ошибка: {error_file} - Отсутствует внешняя или вторая внутренняя аудио дорожка. Добавьте аудиодорожку."
-                )
-                return
-        
-        self.is_processing = True
-        self.clear_button.config(state='disabled')  # Отключаем кнопку "Очистить список"
-        self.start_animation()  # Запускаем анимацию перед началом обработки
-        
-        # Вычисляем общее количество файлов для обработки
-        total = sum(1 for base, pair in self.file_pairs.items() 
-                    if pair['video'] and self.file_status.get(base, 'pending') == 'pending')
-        
-        # Устанавливаем начальное значение прогресса "0/total" сразу после нажатия
-        self.after(0, lambda t=total: [
-            self.progress_label.config(text=f"0/{t}")
-        ])
-        
-        # Запускаем поток обработки
-        threading.Thread(target=self._processing_thread, daemon=True).start()
+            # Проверяем, не нажата ли кнопка STOP во время работы FFmpeg
+            while ffmpeg_process.poll() is None:  # Пока процесс не завершён
+                if self.stop_event.is_set():
+                    ffmpeg_process.terminate()  # Завершаем процесс FFmpeg
+                    self.update_item_status(base, 'stopped')  # Обновляем статус
+                    return
+                time.sleep(0.1)  # Небольшая задержка для снижения нагрузки
+
+            # Если остановка не запрошена, завершаем успешно
+            if not self.stop_event.is_set():
+                self.update_item_status(base, 'done')
+        except Exception as e:
+            self.update_item_status(base, 'error')
+            print(f"Ошибка при обработке {pair['video']}: {str(e)}")
 
     def run_ffmpeg_external(self, video, audio, output):
         ffmpeg_path = resource_path("ffmpeg.exe")
         if not os.path.exists(ffmpeg_path):
             raise FileNotFoundError(f"FFmpeg не найден: {ffmpeg_path}")
-
         orig_vol = self.orig_volume.get() / 100
         new_vol = self.new_volume.get() / 100
-
         cmd = [
             ffmpeg_path,
             '-i', f'"{video}"',
@@ -804,95 +975,153 @@ class MergeApp(TkinterDnD.Tk):
             '-map', '[a_mix]',
             '-c:v', 'copy',
             '-c:a', 'aac', '-aac_coder twoloop',
-            '-b:a 192k',
+            '-b:a', '192k',
             '-y', f'"{output}"'
         ]
-
-        process = subprocess.Popen(
+        return subprocess.Popen(
             ' '.join(cmd),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            # Убраны stdout и stderr параметры для вывода логов в консоль
             universal_newlines=True,
             encoding='utf-8',
             errors='ignore'
         )
 
-        output_text = ""
-        while True:
-            line = process.stdout.readline()
-            if line == '' and process.poll() is not None:
-                break
-            if line:
-                output_text += line
-                print(line.strip())
+    def toggle_processing(self):
+        if self.is_processing:
+            self.stop_processing()
+        else:
+            self.start_processing()
 
-        if process.returncode != 0:
-            raise Exception(f"FFmpeg error (code {process.returncode})")
+    def start_processing(self):
+        if not self.file_pairs:
+            return
+        self.is_processing = True
+        self.merge_button.config(text="STOP", bg="#FF6347")
+        self.clear_button.config(state='disabled')
+        self.start_animation()
+        total = sum(1 for base, pair in self.file_pairs.items() 
+                    if pair['video'] and self.file_status.get(base, 'pending') == 'pending')
+        self.after(0, lambda t=total: [
+            self.progress_label.config(text=f"0/{t}")
+        ])
+        self.stop_event = threading.Event()
+        threading.Thread(target=self._processing_thread, daemon=True).start()
 
+    def stop_processing(self):
+            if self.is_processing:
+                self.stop_event.set()
+                self.is_processing = False
+                
+                # Завершаем активные процессы FFmpeg
+                for process in self.active_ffmpeg_processes:
+                    if process.poll() is None:
+                        process.terminate()
+                        try:
+                            process.wait(timeout=1)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                self.active_ffmpeg_processes.clear()
+
+                # Удаляем временные файлы и сбрасываем статус
+                for base, pair in self.file_pairs.items():
+                    if self.file_status.get(base) != 'done':  # Сохраняем готовые файлы
+                        video_path = pair['video']
+                        video_dir = os.path.dirname(video_path)
+                        name, ext = os.path.splitext(os.path.basename(video_path))
+                        temp_output_path = os.path.join(video_dir, "temp", f"{name}_RUS.mkv")
+                        if os.path.exists(temp_output_path):
+                            try:
+                                os.remove(temp_output_path)
+                            except Exception as e:
+                                print(f"Ошибка при удалении {temp_output_path}: {e}")
+                        self.update_item_status(base, 'pending')  # Сбрасываем статус
+
+                # Обновляем интерфейс
+                self.merge_button.config(text="GO", bg="#4CAF50")
+                self.clear_button.config(state='normal')
+                self.after(0, lambda: [
+                    self.status.set("Обработка остановлена"),
+                    self.progress.set(0),
+                    self.progress_label.config(text=""),
+                    self.done_label.config(text="")
+                ])
+            
     def _processing_thread(self):
-        try:
-            total = sum(1 for base, pair in self.file_pairs.items() 
-                        if pair['video'] and self.file_status.get(base, 'pending') == 'pending')
-            processed = 0
-            lock = threading.Lock()
+        """Основной поток обработки файлов"""
+        total = sum(1 for base, pair in self.file_pairs.items() 
+                   if pair['video'] and self.file_status.get(base, 'pending') in ['pending', 'stopped', 'error'])
+        processed = 0
+        self.active_ffmpeg_processes = []
 
-            def process_file(base, pair):
-                nonlocal processed
-                try:
-                    self.update_item_status(base, 'processing')
-                    video_path = pair['video']
-                    video_dir = os.path.dirname(video_path)
-                    name, ext = os.path.splitext(os.path.basename(video_path))
-                    output_path = os.path.join(video_dir, f"{name}_RUS.mkv")
+        def process_file(base, pair):
+            nonlocal processed
+            if self.stop_event.is_set():
+                return
+                
+            try:
+                self.update_item_status(base, 'processing')
+                video_path = pair['video']
+                video_dir = os.path.dirname(video_path)
+                name, ext = os.path.splitext(os.path.basename(video_path))
+                temp_dir = os.path.join(video_dir, "temp")
+                os.makedirs(temp_dir, exist_ok=True)
+                temp_output_path = os.path.join(temp_dir, f"{name}_RUS.mkv")
+                output_path = os.path.join(video_dir, f"{name}_RUS.mkv")
+                
+                # Запускаем FFmpeg
+                if pair['audio']:
+                    ffmpeg_process = self.run_ffmpeg_external(pair['video'], pair['audio'], temp_output_path)
+                else:
+                    ffmpeg_process = self.run_ffmpeg_embedded(pair['video'], temp_output_path, pair.get('track_info', []))
+                
+                self.active_ffmpeg_processes.append(ffmpeg_process)
+                
+                # Ожидаем завершения
+                while ffmpeg_process.poll() is None:
+                    if self.stop_event.is_set():
+                        ffmpeg_process.terminate()
+                        self.active_ffmpeg_processes.remove(ffmpeg_process)
+                        self.update_item_status(base, 'stopped')
+                        return
+                    time.sleep(0.1)
 
-                    # Обработка файла
-                    if pair['audio']:
-                        self.run_ffmpeg_external(pair['video'], pair['audio'], output_path)
-                    else:
-                        self.run_ffmpeg_embedded(pair['video'], output_path, pair.get('track_info', []))
+                if not self.stop_event.is_set() and ffmpeg_process.returncode != 0:
+                    raise Exception(f"FFmpeg ошибка (код {ffmpeg_process.returncode})")
 
-                    # Обновление статуса
+                self.active_ffmpeg_processes.remove(ffmpeg_process)
+
+                # Перемещаем файл после успешной обработки
+                if not self.stop_event.is_set():
+                    shutil.move(temp_output_path, output_path)
                     self.update_item_status(base, 'done')
                     self.created_files.append(pair['video'])
                     if pair['audio']:
                         self.created_files.append(pair['audio'])
-
-                except Exception as e:
-                    print(f"Ошибка при обработке {pair['video']}: {str(e)}")
+            
+            except Exception as e:
+                print(f"Ошибка при обработке {pair['video']}: {str(e)}")
+                if not self.stop_event.is_set():
                     self.update_item_status(base, 'error')
-                    self.skipped_files.append(pair['video'])
+            finally:
+                processed += 1
+                progress = (processed / total) * 100 if total > 0 else 100
+                self.after(0, lambda p=progress, pr=processed, t=total: [
+                    self.progress.set(p),
+                    self.progress_label.config(text=f"{pr}/{t}")
+                ])
 
-                # Обновление прогресса
-                with lock:
-                    processed += 1
-                    progress = (processed / total) * 100 if total > 0 else 100
-                    self.after(0, lambda p=progress, pr=processed, t=total: [
-                        self.progress.set(p),
-                        self.progress_label.config(text=f"{pr}/{t}")
-                    ])
+        # Запускаем обработку в потоках
+        with ThreadPoolExecutor() as executor:
+            futures = [executor.submit(process_file, base, pair) 
+                       for base, pair in self.file_pairs.items() 
+                       if pair['video'] and self.file_status.get(base, 'pending') in ['pending', 'stopped', 'error']]
+            for future in concurrent.futures.as_completed(futures):
+                if self.stop_event.is_set():
+                    break
+                future.result()
 
-            # Запуск обработки в пуле потоков
-            with ThreadPoolExecutor() as executor:
-                futures = []
-                for base, pair in self.file_pairs.items():
-                    if pair['video'] and self.file_status.get(base, 'pending') == 'pending':
-                        futures.append(executor.submit(process_file, base, pair))
-
-                # Ожидание завершения всех задач
-                for future in concurrent.futures.as_completed(futures):
-                    try:
-                        future.result()
-                    except Exception as e:
-                        print(f"Ошибка в потоке: {e}")
-
+        if not self.stop_event.is_set():
             self._finalize_processing()
-
-        except Exception as e:
-            print(f"Критическая ошибка: {str(e)}")
-        finally:
-            self.is_processing = False
-            if hasattr(self, 'after_id') and self.after_id:
-                self.after_cancel(self.after_id)
 
     def update_status(self, message, progress):
         self.after(0, lambda: [
@@ -901,25 +1130,26 @@ class MergeApp(TkinterDnD.Tk):
         ])
 
     def update_item_status(self, base, status):
-        symbol = {
+        """Обновляет статус файла в дереве"""
+        status_symbols = {
             'pending': '🕒',
             'processing': self.animation_phases[self.animation_index],
             'done': '✓',
-            'error': '✗'
-        }[status]
+            'error': '✗',
+            'stopped': '⏹'
+        }
         
+        # Не меняем статус готовых файлов
+        if self.file_status.get(base) == 'done' and status != 'done':
+            return
+            
+        symbol = status_symbols.get(status, '?')
         for item in self.tree.get_children():
             values = self.tree.item(item, 'values')
             if self.get_base_name(values[1]) == base:
-                new_values = (symbol, values[1], values[2])
-                self.tree.item(item, values=new_values, tags=(status,))
+                self.tree.item(item, values=(symbol, values[1], values[2]), tags=(status,))
                 self.file_status[base] = status
-                print(f"Статус {base} обновлен на {status} с символом {symbol}")
                 break
-        
-        # Очищаем надпись, если обработка еще идет
-        if self.is_processing:
-            self.done_label.config(text="")
 
     @staticmethod
     def status_text(status):
@@ -927,7 +1157,8 @@ class MergeApp(TkinterDnD.Tk):
             'pending': 'Ожидает',
             'processing': 'Обработка',
             'done': 'Готово',
-            'error': 'Ошибка'
+            'error': 'Ошибка',
+            'stopped': 'Остановлено'  # Новый статус
         }.get(status, '')
 
     def run_ffmpeg_embedded(self, video, output):
@@ -983,26 +1214,16 @@ class MergeApp(TkinterDnD.Tk):
             raise Exception(f"FFmpeg error (code {process.returncode})")
 
     def run_ffmpeg_embedded(self, video, output, track_info=None):
-        """
-        Обрабатывает видео с внутренними аудиодорожками.
-        :param video: Путь к видеофайлу
-        :param output: Путь для сохранения результата
-        :param track_info: Информация о дорожках (опционально)
-        """
         ffmpeg_path = resource_path("ffmpeg.exe")
         if not os.path.exists(ffmpeg_path):
             raise FileNotFoundError(f"FFmpeg не найден: {ffmpeg_path}")
-
-        # Если track_info не передан, получаем его
         if track_info is None:
             track_count, track_info = self.check_audio_tracks(video)
         else:
             track_count = len(track_info)
-        
         if track_count < 2:
             raise Exception("Недостаточно аудиодорожек для склейки")
-
-        # Находим дорожки по языку
+        
         eng_track = next((t for t in track_info if t['language'] == 'eng'), None)
         rus_track = next((t for t in track_info if t['language'] == 'rus'), None)
         
@@ -1010,7 +1231,6 @@ class MergeApp(TkinterDnD.Tk):
             orig_track = eng_track
             trans_track = rus_track
         else:
-            # Если языки не определены, берем первые две дорожки
             orig_track = track_info[0]
             trans_track = track_info[1]
         
@@ -1018,17 +1238,13 @@ class MergeApp(TkinterDnD.Tk):
         trans_audio_index = trans_track['audio_index']
         orig_channel = orig_track.get('channel_layout', 'stereo')
         trans_channel = trans_track.get('channel_layout', 'stereo')
+        orig_vol = self.orig_volume.get() / 100
+        new_vol = self.new_volume.get() / 100
         
-        # Определяем громкость
-        orig_vol = self.orig_volume.get() / 100  # Оригинальная (английская)
-        new_vol = self.new_volume.get() / 100    # Перевод (русский)
-        
-        # Инверсия дорожек, если выбрано
         if self.invert_tracks.get():
             orig_audio_index, trans_audio_index = trans_audio_index, orig_audio_index
             orig_vol, new_vol = new_vol, orig_vol
         
-        # Формируем фильтры с учетом количества каналов
         if orig_channel == 'mono':
             orig_filter = f"[0:a:{orig_audio_index}]pan=stereo|c0=c0|c1=c0,volume={orig_vol}[a0]"
         else:
@@ -1041,7 +1257,6 @@ class MergeApp(TkinterDnD.Tk):
         
         filter_complex = f"{orig_filter};{trans_filter};[a0][a1]amix=inputs=2:duration=first:dropout_transition=2[a_mix]"
         
-        # Команда FFmpeg
         cmd = [
             ffmpeg_path, 
             '-i', f'"{video}"',
@@ -1050,31 +1265,17 @@ class MergeApp(TkinterDnD.Tk):
             '-map', '[a_mix]',
             '-c:v', 'copy',
             '-c:a', 'aac', '-aac_coder twoloop',
-            '-b:a 192k',  # Фиксированный битрейт
+            '-b:a', '192k',
             '-y', f'"{output}"'
         ]
         
-        # Запуск FFmpeg
-        process = subprocess.Popen(
+        return subprocess.Popen(
             ' '.join(cmd),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            # Убраны stdout и stderr параметры для вывода логов в консоль
             universal_newlines=True,
             encoding='utf-8',
             errors='ignore'
         )
-        
-        output_text = ""
-        while True:
-            line = process.stdout.readline()
-            if line == '' and process.poll() is not None:
-                break
-            if line:
-                output_text += line
-                print(line.strip())
-        
-        if process.returncode != 0:
-            raise Exception(f"FFmpeg error (code {process.returncode})")
 
     def mix_audio_tracks(self, video, output, orig_track, trans_track, orig_vol, new_vol):
         """
@@ -1119,10 +1320,12 @@ class MergeApp(TkinterDnD.Tk):
             raise Exception(f"FFmpeg error (code {process.returncode})")
 
     def _finalize_processing(self):
-        if hasattr(self, 'after_id') and self.after_id:
+        if self.stop_event.is_set():  # Проверяем, была ли остановка
+            return
+        if hasattr(self, 'after_id') and self.after_id:  # Отменяем анимацию, если она есть
             self.after_cancel(self.after_id)
-        
         try:
+            # Обработка созданных файлов (бэкапы, удаление и т.д.)
             if self.created_files:
                 if self.backup_files.get():
                     if self.remove_source.get():
@@ -1132,37 +1335,49 @@ class MergeApp(TkinterDnD.Tk):
                 else:
                     self.remove_source_files()
 
-            success_count = len([base for base, status in self.file_status.items() 
-                               if status == 'done'])
-            error_count = len([base for base, status in self.file_status.items() 
-                             if status == 'error'])
-            
+            # Подсчет успешных и ошибочных операций
+            success_count = len([base for base, status in self.file_status.items() if status == 'done'])
+            error_count = len([base for base, status in self.file_status.items() if status == 'error'])
             status_text = f"Готово! Успешно: {success_count}, Ошибок: {error_count}"
-            
+
+            # Обновление интерфейса
             self.after(0, lambda: [
                 self.status.set(status_text),
                 self.progress.set(100),
-                self.progress_label.config(text=""),  # Очищаем текст прогресса
+                self.progress_label.config(text=""),
                 self.done_label.config(text="Готово!" if success_count > 0 else ""),
                 self.clear_button.config(state='normal')
             ])
-            
-            print("Финализация завершена, вызываем window_focus_effect")
             self.window_focus_effect()
+
+            # Удаление папки "temp" для каждого видео файла
+            for base, pair in self.file_pairs.items():
+                video_path = pair['video']
+                video_dir = os.path.dirname(video_path)
+                temp_dir = os.path.join(video_dir, "temp")
+                if os.path.exists(temp_dir):
+                    try:
+                        shutil.rmtree(temp_dir)
+                        print(f"Удалена временная папка: {temp_dir}")
+                    except Exception as e:
+                        print(f"Не удалось удалить временную папку {temp_dir}: {e}")
 
         except Exception as e:
             print(f"Ошибка при завершении обработки: {str(e)}")
+        
         finally:
+            # Сброс состояния обработки и обновление кнопки GO
             self.is_processing = False
-            self.clear_button.config(state='normal')  # Гарантируем включение кнопки даже при ошибке
+            self.clear_button.config(state='normal')
             self.animation_index = 0
             if hasattr(self, 'after_id'):
                 self.after_id = None
-
+            # Явное обновление кнопки GO в исходное состояние
+            self.merge_button.config(text="GO", bg="#4CAF50")
+        
     def window_focus_effect(self):
-        print("Вызов window_focus_effect")  # Отладка
-        self.bell()  # Звуковой сигнал для привлечения внимания
-        self.lift()  # Поднимаем окно поверх других
+        self.bell()
+        self.lift()
 
     def reset_window_state(self, original_title):
         self.attributes('-topmost', False)  # Только убираем topmost

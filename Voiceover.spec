@@ -8,7 +8,9 @@ a = Analysis(
     pathex=['G:\\AUDIO SKLEISCHIK\\GUI\\Compile'],
     binaries=[],
     datas=[
-        ('ffmpeg.exe', '.'),
+        ('ffmpeg.exe', '.'),  
+        ('ffplay.exe', '.'),  
+        ('hey.ico', '.'),     
         *collect_data_files('tkinterdnd2'),
         ('tcl\\tkdnd2.8', 'tcl\\tkdnd2.8')
     ],
@@ -43,4 +45,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon='hey.ico'
 )
