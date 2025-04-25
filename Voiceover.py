@@ -842,27 +842,57 @@ class MergeApp(TkinterDnD.Tk):
     def update_file_pairs(self, new_files):
         base_names = {}
         
-        for path in new_files['video'] + list(self.file_pairs.keys()):
-            base = self.get_base_name(path)
-            base_names[base] = self.file_pairs.get(base, {'video': None, 'audio': None})
-            if path in new_files['video']:
-                base_names[base]['video'] = path
-
-        for path in new_files['audio']:
-            base = self.get_base_name(path)
-            if base not in base_names:
-                base_names[base] = {'video': None, 'audio': path}
-            else:
-                base_names[base]['audio'] = path
+        # Сначала добавляем все видеофайлы
+        for video_path in new_files['video']:
+            base = self.get_base_name(video_path)
+            base_names[base] = {'video': video_path, 'audio': None}
+        
+        # Затем пытаемся найти подходящие аудиофайлы
+        for audio_path in new_files['audio']:
+            audio_base = self.get_base_name(audio_path)
+            matched = False
+            
+            # Ищем видео с похожим именем
+            for video_base in base_names:
+                if self.is_similar_name(video_base, audio_base):
+                    base_names[video_base]['audio'] = audio_path
+                    matched = True
+                    break
+            
+            # Если не нашли - создаем новую запись только с аудио
+            if not matched:
+                base_names[audio_base] = {'video': None, 'audio': audio_path}
 
         self.file_pairs = base_names
 
     def get_base_name(self, path):
         name = os.path.basename(path)
-        name = re.sub(r'^\d+_', '', name)  # Удаляем ведущие цифры, за которыми следует '_'
-        name = re.sub(r'_(rus|eng)(?=\.[^.]+$)', '', name, flags=re.IGNORECASE)  # Удаляем _rus или _eng перед расширением
-        base_name = os.path.splitext(name)[0].lower()
-        return base_name
+        # Удаляем ведущие цифры с подчеркиванием
+        name = re.sub(r'^\d+_', '', name)
+        # Удаляем языковые суффиксы (_rus, _eng и т.д.)
+        name = re.sub(r'_(rus|eng|audio|track)(?=\.[^.]+$)', '', name, flags=re.IGNORECASE)
+        # Удаляем все, что в скобках
+        name = re.sub(r'\([^)]*\)', '', name)
+        # Заменяем множественные подчеркивания на одно
+        name = re.sub(r'_+', '_', name)
+        # Заменяем множественные точки на одну (кроме расширения)
+        base, ext = os.path.splitext(name)
+        base = re.sub(r'\.+', '.', base)
+        name = base + ext
+        # Приводим к нижнему регистру и удаляем расширение
+        return os.path.splitext(name.lower())[0]
+
+    def is_similar_name(self, name1, name2):
+        # Приводим к нижнему регистру
+        name1 = name1.lower()
+        name2 = name2.lower()
+        
+        # Удаляем все небуквенно-цифровые символы
+        name1 = re.sub(r'[^a-z0-9]', '', name1)
+        name2 = re.sub(r'[^a-z0-9]', '', name2)
+        
+        # Считаем похожими, если одно имя содержится в другом
+        return name1 in name2 or name2 in name1
 
     def update_treeview(self):
         self.tree.delete(*self.tree.get_children())
