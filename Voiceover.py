@@ -91,15 +91,17 @@ class MergeApp(TkinterDnD.Tk):
             self.iconbitmap(resource_path('hey.ico'))
         except:
             pass
-        self.version = "1.1"
+        self.version = "1.2"
         self.title(f"Track-Packer")
         self.animation_phases = ['⏳', '⌛']
         self.show_console = tk.BooleanVar(value=False)
         self.preview_process = None
         self.is_preview_playing = False
+        self.delete_original_track = tk.BooleanVar(value=False)
         self.ffmpeg_process = None
         self.ffplay_process = None
         self.preview_button = None
+        self.processed = 0
         signal.signal(signal.SIGINT, self.handle_sigint)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.play_icon_text = "▶"
@@ -122,6 +124,7 @@ class MergeApp(TkinterDnD.Tk):
         self.file_pairs = {}
         self.created_files = []
         self.skipped_files = []
+        self.all_files = {'video': [], 'audio': []}
         self.orig_volume = tk.DoubleVar(value=5)
         self.new_volume = tk.DoubleVar(value=100)
         self.remove_source = tk.BooleanVar(value=False)
@@ -136,18 +139,44 @@ class MergeApp(TkinterDnD.Tk):
     def handle_sigint(self, signum, frame):
         self.on_close()
 
+    def get_video_duration(self, video_path):
+        ffprobe_path = resource_path("ffprobe.exe")
+        cmd = [
+            ffprobe_path,
+            '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            video_path
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            duration = float(result.stdout.strip())
+            return duration
+        except Exception as e:
+            print(f"Ошибка при получении длительности {video_path}: {e}")
+            return None
+
     def on_close(self):
         """Вызывается при закрытии окна"""
         self.stop_preview()
         self.stop_processing()
         self.destroy()
-
+        
+    def read_ffmpeg_logs(self, process, base, duration):
+        for line in iter(process.stderr.readline, ''):
+            if self.stop_event.is_set():
+                break
+            # Выводим строку лога в консоль
+            print(line.strip())
+            # Парсим прогресс как раньше
+            current_time = self.parse_ffmpeg_progress(line)
+            if current_time is not None:
+                progress = (current_time / duration) * 100
+                self.update_item_status(base, 'processing', progress=min(progress, 100))
+        process.stderr.close()
+    
     def start_animation(self):
-        if self.is_processing:
-            self.animation_phases = ['⏳', '⏳', '⏳', '⌛', '⌛', '⌛']
-            self.animation_index = 0
-            if not hasattr(self, 'after_id') or self.after_id is None:
-                self.update_animation()
+        pass
 
     def update_animation(self):
         if not self.is_processing:
@@ -334,10 +363,22 @@ class MergeApp(TkinterDnD.Tk):
         bottom_frame = ttk.Frame(main_frame)
         bottom_frame.grid(row=5, column=0, columnspan=2, sticky="ew", pady=1)
 
-        ttk.Checkbutton(bottom_frame, text="Backup", variable=self.backup_files).pack(side=tk.LEFT, padx=5)
-        ttk.Checkbutton(bottom_frame, text="Console", variable=self.show_console,
-                       command=self.toggle_console).pack(side=tk.LEFT, padx=5)
-        
+        # Чекбокс "Del Original" с тултипом
+        delete_original_checkbox = ttk.Checkbutton(bottom_frame, text="Del Original", variable=self.delete_original_track)
+        delete_original_checkbox.pack(side=tk.LEFT, padx=5)
+        ToolTip(delete_original_checkbox, "Удаляет оригинальные аудиодорожки из выходного файла.\nЕсли не выбрано, оригинальные дорожки сохраняются.")
+
+        # Чекбокс "Backup" с тултипом
+        backup_checkbox = ttk.Checkbutton(bottom_frame, text="Backup", variable=self.backup_files)
+        backup_checkbox.pack(side=tk.LEFT, padx=5)
+        ToolTip(backup_checkbox, "Создает резервные копии оригинальных файлов в папке 'backup'.")
+
+        # Чекбокс "Console" с тултипом
+        console_checkbox = ttk.Checkbutton(bottom_frame, text="Console", variable=self.show_console, command=self.toggle_console)
+        console_checkbox.pack(side=tk.LEFT, padx=5)
+        ToolTip(console_checkbox, "Отображать консоль ffmpeg.")
+
+        # Лейбл версии
         version_label = ttk.Label(bottom_frame, text=f"Version: {self.version}", anchor="e")
         version_label.pack(side=tk.RIGHT, padx=5)
 
@@ -373,16 +414,24 @@ class MergeApp(TkinterDnD.Tk):
         if not selected_items:
             return
 
-        # Удаляем выделенные элементы из file_pairs
         for item in selected_items:
             values = self.tree.item(item, 'values')
             base = self.get_base_name(values[1])
+            video_path = self.file_pairs[base]['video'] if base in self.file_pairs and self.file_pairs[base]['video'] else None
+            audio_path = self.file_pairs[base]['audio'] if base in self.file_pairs and self.file_pairs[base]['audio'] else None
+            
+            # Удаляем из file_pairs и file_status
             if base in self.file_pairs:
                 del self.file_pairs[base]
             if base in self.file_status:
                 del self.file_status[base]
+            
+            # Удаляем из all_files
+            if video_path and video_path in self.all_files['video']:
+                self.all_files['video'].remove(video_path)
+            if audio_path and audio_path in self.all_files['audio']:
+                self.all_files['audio'].remove(audio_path)
 
-        # Обновляем отображение списка
         self.update_treeview()
     
     def toggle_preview(self):
@@ -817,20 +866,21 @@ class MergeApp(TkinterDnD.Tk):
             self.process_paths(paths)
 
     def process_paths(self, paths):
-        new_files = {'video': [], 'audio': []}
-        for path in self.tk.splitlist(paths):
-            path = path.strip('{}')
-            if os.path.isdir(path):
-                for root, _, files in os.walk(path):
-                    for file in files:
-                        full_path = os.path.join(root, file)
-                        self.classify_file(full_path, new_files)
-            else:
-                self.classify_file(path, new_files)
-                
-        self.old_file_pairs = self.file_pairs.copy()
-        self.update_file_pairs(new_files)
-        self.update_treeview()
+            for path in self.tk.splitlist(paths):
+                path = path.strip('{}')
+                if path not in self.all_files['video'] and path not in self.all_files['audio']:
+                    if os.path.isdir(path):
+                        for root, _, files in os.walk(path):
+                            for file in files:
+                                full_path = os.path.join(root, file)
+                                if full_path not in self.all_files['video'] and full_path not in self.all_files['audio']:
+                                    self.classify_file(full_path, self.all_files)
+                    else:
+                        self.classify_file(path, self.all_files)
+            
+            self.old_file_pairs = self.file_pairs.copy()
+            self.update_file_pairs(self.all_files)
+            self.update_treeview()
 
     def classify_file(self, path, storage):
         ext = os.path.splitext(path)[1].lower()
@@ -839,30 +889,24 @@ class MergeApp(TkinterDnD.Tk):
         elif ext in video_ext:
             storage['video'].append(path)
 
-    def update_file_pairs(self, new_files):
+    def update_file_pairs(self, files):
         base_names = {}
         
-        # Сначала добавляем все видеофайлы
-        for video_path in new_files['video']:
+        for video_path in files['video']:
             base = self.get_base_name(video_path)
             base_names[base] = {'video': video_path, 'audio': None}
         
-        # Затем пытаемся найти подходящие аудиофайлы
-        for audio_path in new_files['audio']:
+        for audio_path in files['audio']:
             audio_base = self.get_base_name(audio_path)
             matched = False
-            
-            # Ищем видео с похожим именем
             for video_base in base_names:
                 if self.is_similar_name(video_base, audio_base):
                     base_names[video_base]['audio'] = audio_path
                     matched = True
                     break
-            
-            # Если не нашли - создаем новую запись только с аудио
             if not matched:
                 base_names[audio_base] = {'video': None, 'audio': audio_path}
-
+        
         self.file_pairs = base_names
 
     def get_base_name(self, path):
@@ -895,13 +939,15 @@ class MergeApp(TkinterDnD.Tk):
         return name1 in name2 or name2 in name1
 
     def update_treeview(self):
-        self.tree.delete(*self.tree.get_children())
+        self.tree.delete(*self.tree.get_children())  # Очищаем Treeview
         for base, pair in self.file_pairs.items():
-            if base in self.old_file_pairs and \
-               self.file_pairs[base]['video'] == self.old_file_pairs[base]['video'] and \
-               self.file_pairs[base].get('audio', None) == self.old_file_pairs[base].get('audio', None):
-                status = self.file_status.get(base, 'pending')
-                video = os.path.basename(pair['video'])
+            video = os.path.basename(pair['video']) if pair['video'] else ""
+            audio = ""
+
+            current_status = self.file_status.get(base, 'pending')
+
+            if current_status == 'done':
+                status = 'done'
                 if pair['audio']:
                     audio = os.path.basename(pair['audio'])
                 else:
@@ -912,30 +958,31 @@ class MergeApp(TkinterDnD.Tk):
                     else:
                         audio = "None"
             else:
-                status = None
-                video = os.path.basename(pair['video']) if pair['video'] else ""
-                if pair['video'] and pair['audio']:
-                    status = 'pending'
-                    audio = os.path.basename(pair['audio'])
-                elif pair['video'] and not pair['audio']:
-                    track_count, track_info = self.check_audio_tracks(pair['video'])
-                    pair['track_info'] = track_info
-                    if track_count > 1:
+                if pair['video']:
+                    if pair['audio']:
                         status = 'pending'
-                        lang_info = self.get_track_language_info(track_info)
-                        audio = f"({lang_info})"
+                        audio = os.path.basename(pair['audio'])
                     else:
-                        status = 'error'
-                        audio = "None"
+                        track_count, track_info = self.check_audio_tracks(pair['video'])
+                        pair['track_info'] = track_info
+                        if track_count > 1:
+                            status = 'pending'
+                            lang_info = self.get_track_language_info(track_info)
+                            audio = f"({lang_info})"
+                        else:
+                            status = 'error'
+                            audio = "None"
                 else:
                     status = 'error'
                     audio = "None"
+
             self.tree.insert('', 'end', values=(self.status_text(status), video, audio), tags=(status,))
             self.file_status[base] = status
+
         for base in list(self.file_status.keys()):
             if base not in self.file_pairs:
                 del self.file_status[base]
-        # Обновляем состояние кнопки "GO" после изменения списка
+
         self.update_merge_button_state()
             
     def get_track_language_info(self, track_info):
@@ -952,6 +999,7 @@ class MergeApp(TkinterDnD.Tk):
 
     def clear_list(self):
         self.file_pairs = {}
+        self.all_files = {'video': [], 'audio': []}
         self.tree.delete(*self.tree.get_children())
         self.created_files = []
         self.skipped_files = []
@@ -962,32 +1010,72 @@ class MergeApp(TkinterDnD.Tk):
     
     def process_file(self, base, pair):
         if self.stop_event.is_set():
-            return  # Не начинаем, если уже остановлено
+            return
         try:
-            self.update_item_status(base, 'processing')
+            duration = self.get_video_duration(pair['video'])
+            if duration is None:
+                raise Exception("Не удалось получить длительность видео")
+            self.update_item_status(base, 'processing', progress=0.0)
             video_path = pair['video']
-            output_path = os.path.join(os.path.dirname(video_path), f"{os.path.splitext(os.path.basename(video_path))[0]}_RUS.mkv")
+            video_dir = os.path.dirname(video_path)
+            name, ext = os.path.splitext(os.path.basename(video_path))
+            temp_dir = os.path.join(video_dir, "temp")
+            os.makedirs(temp_dir, exist_ok=True)
+            temp_output_path = os.path.join(temp_dir, f"{name}_RUS.mkv")
+            output_path = os.path.join(video_dir, f"{name}_RUS.mkv")
             
-            # Запускаем FFmpeg и сохраняем процесс
             if pair['audio']:
-                ffmpeg_process = self.run_ffmpeg_external(pair['video'], pair['audio'], output_path)
+                ffmpeg_process = self.run_ffmpeg_external(pair['video'], pair['audio'], temp_output_path)
             else:
-                ffmpeg_process = self.run_ffmpeg_embedded(pair['video'], output_path, pair.get('track_info', []))
-
-            # Проверяем, не нажата ли кнопка STOP во время работы FFmpeg
-            while ffmpeg_process.poll() is None:  # Пока процесс не завершён
+                # Убедимся, что track_info актуальна
+                track_count, track_info = self.check_audio_tracks(pair['video'])
+                if track_count < 2:
+                    raise Exception("Недостаточно аудиодорожек")
+                pair['track_info'] = track_info
+                ffmpeg_process = self.run_ffmpeg_embedded(pair['video'], temp_output_path, track_info)
+            
+            # Остальная логика обработки
+            self.active_ffmpeg_processes.append(ffmpeg_process)
+            threading.Thread(target=self.read_ffmpeg_logs, args=(ffmpeg_process, base, duration), daemon=True).start()
+            
+            while ffmpeg_process.poll() is None:
                 if self.stop_event.is_set():
-                    ffmpeg_process.terminate()  # Завершаем процесс FFmpeg
-                    self.update_item_status(base, 'stopped')  # Обновляем статус
+                    ffmpeg_process.terminate()
+                    self.active_ffmpeg_processes.remove(ffmpeg_process)
+                    self.update_item_status(base, 'stopped')
                     return
-                time.sleep(0.1)  # Небольшая задержка для снижения нагрузки
+                time.sleep(0.1)
 
-            # Если остановка не запрошена, завершаем успешно
+            if not self.stop_event.is_set() and ffmpeg_process.returncode != 0:
+                raise Exception(f"FFmpeg ошибка (код {ffmpeg_process.returncode})")
+
+            self.active_ffmpeg_processes.remove(ffmpeg_process)
             if not self.stop_event.is_set():
+                shutil.move(temp_output_path, output_path)
                 self.update_item_status(base, 'done')
+                current_files = [pair['video']]
+                if pair['audio']:
+                    current_files.append(pair['audio'])
+                if self.backup_files.get():
+                    if self.remove_source.get():
+                        self.remove_source_files(current_files)
+                    else:
+                        self.create_backup_files(current_files)
+                self.created_files.extend(current_files)
+        
         except Exception as e:
-            self.update_item_status(base, 'error')
             print(f"Ошибка при обработке {pair['video']}: {str(e)}")
+            if not self.stop_event.is_set():
+                self.update_item_status(base, 'error')
+        finally:
+            self.processed += 1
+            total = sum(1 for base, pair in self.file_pairs.items() 
+                        if pair['video'] and self.file_status.get(base, 'pending') in ['pending', 'stopped', 'error'])
+            progress = (self.processed / total) * 100 if total > 0 else 100
+            self.after(0, lambda p=progress, pr=self.processed, t=total: [
+                self.progress.set(p),
+                self.progress_label.config(text=f"{pr}/{t}")
+            ])
 
     def run_ffmpeg_external(self, video, audio, output):
         ffmpeg_path = resource_path("ffmpeg.exe")
@@ -995,27 +1083,49 @@ class MergeApp(TkinterDnD.Tk):
             raise FileNotFoundError(f"FFmpeg не найден: {ffmpeg_path}")
         orig_vol = self.orig_volume.get() / 100
         new_vol = self.new_volume.get() / 100
+        
         cmd = [
             ffmpeg_path,
-            '-i', f'"{video}"',
-            '-i', f'"{audio}"',
+            '-i', video,
+            '-i', audio,
             '-filter_complex',
-            f'[0:a]volume={orig_vol}[a0];[1:a]volume={new_vol}[a1];[a0][a1]amix=inputs=2:duration=first:dropout_transition=2[a_mix]',
-            '-map', '0:v:0',
-            '-map', '[a_mix]',
-            '-c:v', 'copy',
-            '-c:a', 'aac', '-aac_coder twoloop',
-            '-b:a', '192k',
-            '-y', f'"{output}"'
+            f'[0:a:0]volume={orig_vol}[a0];[1:a]volume={new_vol}[a1];[a0][a1]amix=inputs=2:duration=first:dropout_transition=2[a_mix]',
         ]
-        return subprocess.Popen(
-            ' '.join(cmd),
-            # Убраны stdout и stderr параметры для вывода логов в консоль
+        
+        if self.delete_original_track.get():
+            cmd.extend([
+                '-map', '0:v:0',
+                '-map', '[a_mix]',
+                '-c:v', 'copy',
+                '-c:a', 'aac', '-aac_coder', 'twoloop',
+                '-b:a', '192k'
+            ])
+        else:
+            cmd.extend([
+                '-map', '0:v:0',
+                '-map', '[a_mix]',
+                '-map', '0:a:0',
+                '-c:v', 'copy',
+                '-c:a:0', 'aac', '-aac_coder', 'twoloop',
+                '-b:a:0', '192k',
+                '-c:a:1', 'copy'
+            ])
+        
+        cmd.extend(['-y', output])
+        
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             universal_newlines=True,
             encoding='utf-8',
             errors='ignore'
         )
-
+        
+        threading.Thread(target=self.read_ffmpeg_logs, args=(process,), daemon=True).start()
+        
+        return process
+        
     def toggle_processing(self):
         if self.is_processing:
             self.stop_processing()
@@ -1077,19 +1187,19 @@ class MergeApp(TkinterDnD.Tk):
                 ])
             
     def _processing_thread(self):
-        """Основной поток обработки файлов"""
         total = sum(1 for base, pair in self.file_pairs.items() 
-                   if pair['video'] and self.file_status.get(base, 'pending') in ['pending', 'stopped', 'error'])
-        processed = 0
+                    if pair['video'] and self.file_status.get(base, 'pending') in ['pending', 'stopped', 'error'])
+        self.processed = 0  # Сбрасываем счетчик перед началом обработки
         self.active_ffmpeg_processes = []
 
         def process_file(base, pair):
-            nonlocal processed
             if self.stop_event.is_set():
                 return
-                
             try:
-                self.update_item_status(base, 'processing')
+                duration = self.get_video_duration(pair['video'])
+                if duration is None:
+                    raise Exception("Не удалось получить длительность видео")
+                self.update_item_status(base, 'processing', progress=0.0)
                 video_path = pair['video']
                 video_dir = os.path.dirname(video_path)
                 name, ext = os.path.splitext(os.path.basename(video_path))
@@ -1098,7 +1208,6 @@ class MergeApp(TkinterDnD.Tk):
                 temp_output_path = os.path.join(temp_dir, f"{name}_RUS.mkv")
                 output_path = os.path.join(video_dir, f"{name}_RUS.mkv")
                 
-                # Запускаем FFmpeg
                 if pair['audio']:
                     ffmpeg_process = self.run_ffmpeg_external(pair['video'], pair['audio'], temp_output_path)
                 else:
@@ -1106,7 +1215,8 @@ class MergeApp(TkinterDnD.Tk):
                 
                 self.active_ffmpeg_processes.append(ffmpeg_process)
                 
-                # Ожидаем завершения
+                threading.Thread(target=self.read_ffmpeg_logs, args=(ffmpeg_process, base, duration), daemon=True).start()
+                
                 while ffmpeg_process.poll() is None:
                     if self.stop_event.is_set():
                         ffmpeg_process.terminate()
@@ -1120,27 +1230,33 @@ class MergeApp(TkinterDnD.Tk):
 
                 self.active_ffmpeg_processes.remove(ffmpeg_process)
 
-                # Перемещаем файл после успешной обработки
                 if not self.stop_event.is_set():
                     shutil.move(temp_output_path, output_path)
                     self.update_item_status(base, 'done')
-                    self.created_files.append(pair['video'])
+                    # Создаем список файлов для backup только для текущей задачи
+                    current_files = [pair['video']]
                     if pair['audio']:
-                        self.created_files.append(pair['audio'])
+                        current_files.append(pair['audio'])
+                    # Выполняем backup, если включена опция
+                    if self.backup_files.get():
+                        if self.remove_source.get():
+                            self.remove_source_files(current_files)
+                        else:
+                            self.create_backup_files(current_files)
+                    self.created_files.extend(current_files)
             
             except Exception as e:
                 print(f"Ошибка при обработке {pair['video']}: {str(e)}")
                 if not self.stop_event.is_set():
                     self.update_item_status(base, 'error')
             finally:
-                processed += 1
-                progress = (processed / total) * 100 if total > 0 else 100
-                self.after(0, lambda p=progress, pr=processed, t=total: [
+                self.processed += 1
+                progress = (self.processed / total) * 100 if total > 0 else 100
+                self.after(0, lambda p=progress, pr=self.processed, t=total: [
                     self.progress.set(p),
                     self.progress_label.config(text=f"{pr}/{t}")
                 ])
 
-        # Запускаем обработку в потоках
         with ThreadPoolExecutor() as executor:
             futures = [executor.submit(process_file, base, pair) 
                        for base, pair in self.file_pairs.items() 
@@ -1152,32 +1268,30 @@ class MergeApp(TkinterDnD.Tk):
 
         if not self.stop_event.is_set():
             self._finalize_processing()
-
+        
     def update_status(self, message, progress):
         self.after(0, lambda: [
             self.status.set(message),
             self.progress.set(progress)
         ])
 
-    def update_item_status(self, base, status):
-        """Обновляет статус файла в дереве"""
+    def update_item_status(self, base, status, progress=None):
         status_symbols = {
             'pending': '🕒',
-            'processing': self.animation_phases[self.animation_index],
             'done': '✓',
             'error': '✗',
             'stopped': '⏹'
         }
         
-        # Не меняем статус готовых файлов
-        if self.file_status.get(base) == 'done' and status != 'done':
-            return
-            
-        symbol = status_symbols.get(status, '?')
         for item in self.tree.get_children():
             values = self.tree.item(item, 'values')
             if self.get_base_name(values[1]) == base:
-                self.tree.item(item, values=(symbol, values[1], values[2]), tags=(status,))
+                if status == 'processing' and progress is not None:
+                    status_text = f"{progress:.1f}%"
+                else:
+                    status_text = status_symbols.get(status, '?')
+                
+                self.tree.item(item, values=(status_text, values[1], values[2]), tags=(status,))
                 self.file_status[base] = status
                 break
 
@@ -1287,26 +1401,51 @@ class MergeApp(TkinterDnD.Tk):
         
         filter_complex = f"{orig_filter};{trans_filter};[a0][a1]amix=inputs=2:duration=first:dropout_transition=2[a_mix]"
         
-        cmd = [
-            ffmpeg_path, 
-            '-i', f'"{video}"',
-            '-filter_complex', filter_complex,
-            '-map', '0:v:0',
-            '-map', '[a_mix]',
-            '-c:v', 'copy',
-            '-c:a', 'aac', '-aac_coder twoloop',
-            '-b:a', '192k',
-            '-y', f'"{output}"'
-        ]
+        cmd = [ffmpeg_path, '-i', video, '-filter_complex', filter_complex]
         
-        return subprocess.Popen(
-            ' '.join(cmd),
-            # Убраны stdout и stderr параметры для вывода логов в консоль
+        if self.delete_original_track.get():
+            cmd.extend([
+                '-map', '0:v:0',
+                '-map', '[a_mix]',
+                '-c:v', 'copy',
+                '-c:a', 'aac', '-aac_coder', 'twoloop',
+                '-b:a', '192k'
+            ])
+        else:
+            cmd.extend([
+                '-map', '0:v:0',
+                '-map', '[a_mix]',
+                '-map', f'0:a:{orig_track["audio_index"]}',
+                '-c:v', 'copy',
+                '-c:a:0', 'aac', '-aac_coder', 'twoloop',
+                '-b:a:0', '192k',
+                '-c:a:1', 'copy'
+            ])
+        
+        cmd.extend(['-y', output])
+        
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             universal_newlines=True,
             encoding='utf-8',
             errors='ignore'
         )
+        
+        threading.Thread(target=self.read_ffmpeg_logs, args=(process,), daemon=True).start()
+        
+        return process
 
+    def parse_ffmpeg_progress(self, line):
+        match = re.search(r'time=(\d+:\d+:\d+\.\d+)', line)
+        if match:
+            time_str = match.group(1)
+            h, m, s = map(float, time_str.split(':'))
+            total_seconds = h * 3600 + m * 60 + s
+            return total_seconds
+        return None
+        
     def mix_audio_tracks(self, video, output, orig_track, trans_track, orig_vol, new_vol):
         """
         Смешивает две аудио дорожки и добавляет их в выходной файл
@@ -1350,21 +1489,11 @@ class MergeApp(TkinterDnD.Tk):
             raise Exception(f"FFmpeg error (code {process.returncode})")
 
     def _finalize_processing(self):
-        if self.stop_event.is_set():  # Проверяем, была ли остановка
+        if self.stop_event.is_set():
             return
-        if hasattr(self, 'after_id') and self.after_id:  # Отменяем анимацию, если она есть
+        if hasattr(self, 'after_id') and self.after_id:
             self.after_cancel(self.after_id)
         try:
-            # Обработка созданных файлов (бэкапы, удаление и т.д.)
-            if self.created_files:
-                if self.backup_files.get():
-                    if self.remove_source.get():
-                        self.remove_source_files()
-                    else:
-                        self.create_backup_files()
-                else:
-                    self.remove_source_files()
-
             # Подсчет успешных и ошибочных операций
             success_count = len([base for base, status in self.file_status.items() if status == 'done'])
             error_count = len([base for base, status in self.file_status.items() if status == 'error'])
@@ -1396,13 +1525,11 @@ class MergeApp(TkinterDnD.Tk):
             print(f"Ошибка при завершении обработки: {str(e)}")
         
         finally:
-            # Сброс состояния обработки и обновление кнопки GO
             self.is_processing = False
             self.clear_button.config(state='normal')
             self.animation_index = 0
             if hasattr(self, 'after_id'):
                 self.after_id = None
-            # Явное обновление кнопки GO в исходное состояние
             self.merge_button.config(text="GO", bg="#4CAF50")
         
     def window_focus_effect(self):
@@ -1415,10 +1542,10 @@ class MergeApp(TkinterDnD.Tk):
         # Снимаем флаг "поверх всех окон"
         self.attributes('-topmost', False)
     
-    def create_backup_files(self):
-        for f in self.created_files:
+    def create_backup_files(self, files):
+        for f in files:
             try:
-                if os.path.exists(f):  # Проверяем, существует ли файл
+                if os.path.exists(f):
                     backup_dir = os.path.join(os.path.dirname(f), "backup")
                     os.makedirs(backup_dir, exist_ok=True)
                     dest = os.path.join(backup_dir, os.path.basename(f))
@@ -1427,18 +1554,27 @@ class MergeApp(TkinterDnD.Tk):
                         os.remove(dest)
                     
                     shutil.move(f, backup_dir)
+                    print(f"Файл перемещен в backup: {f} -> {dest}")
                 else:
                     print(f"Файл не существует: {f}")
             except Exception as e:
                 print(f"Ошибка перемещения {f}: {str(e)}")
-            
-    def remove_source_files(self):
-        """
-        Удаляет оригинальные файлы (видео и аудио).
-        """
-        for f in self.created_files:
-            try:
+
+def remove_source_files(self, files):
+    for f in files:
+        try:
+            if os.path.exists(f):
                 os.remove(f)
+                print(f"Файл удален: {f}")
+        except Exception as e:
+            print(f"Ошибка удаления {f}: {str(e)}")
+            
+    def remove_source_files(self, files):
+        for f in files:
+            try:
+                if os.path.exists(f):
+                    os.remove(f)
+                    print(f"Файл удален: {f}")
             except Exception as e:
                 print(f"Ошибка удаления {f}: {str(e)}")
 

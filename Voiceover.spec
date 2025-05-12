@@ -8,9 +8,10 @@ a = Analysis(
     pathex=['G:\\AUDIO SKLEISCHIK\\GUI\\Compile'],
     binaries=[],
     datas=[
-        ('ffmpeg.exe', '.'),  
-        ('ffplay.exe', '.'),  
-        ('hey.ico', '.'),     
+        ('ffmpeg.exe', '.'),  # FFmpeg executable
+        ('ffplay.exe', '.'),  # FFplay executable
+		('ffprobe.exe', '.'),  # FFprobe executable
+        ('hey.ico', '.'),     # Иконка приложения
         *collect_data_files('tkinterdnd2'),
         ('tcl\\tkdnd2.8', 'tcl\\tkdnd2.8')
     ],
@@ -45,5 +46,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='hey.ico'
+    icon='hey.ico'  # Добавлено указание на иконку
 )
