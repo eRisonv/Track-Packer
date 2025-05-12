@@ -17,7 +17,6 @@
 
 Скачать - https://github.com/eRisonv/Track-Packer/releases
 ```
-Допускаеются дорожки с суфиксами _rus, пробелами или "_".
 
 Программе подойдут такие примеры:
 video.mp4
