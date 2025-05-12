@@ -11,7 +11,7 @@ a = Analysis(
         ('ffmpeg.exe', '.'),  # FFmpeg executable
         ('ffplay.exe', '.'),  # FFplay executable
 		('ffprobe.exe', '.'),  # FFprobe executable
-        ('hey.ico', '.'),     # Иконка приложения
+        ('hey.ico', '.'),     # РРєРѕРЅРєР° РїСЂРёР»РѕР¶РµРЅРёСЏ
         *collect_data_files('tkinterdnd2'),
         ('tcl\\tkdnd2.8', 'tcl\\tkdnd2.8')
     ],
@@ -46,5 +46,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='hey.ico'  # Добавлено указание на иконку
+    icon='hey.ico'  # Р”РѕР±Р°РІР»РµРЅРѕ СѓРєР°Р·Р°РЅРёРµ РЅР° РёРєРѕРЅРєСѓ
 )
