@@ -1098,7 +1098,7 @@ class MergeApp(TkinterDnD.Tk):
                 '-map', '[a_mix]',
                 '-c:v', 'copy',
                 '-c:a', 'aac', '-aac_coder', 'twoloop',
-                '-b:a', '192k'
+                '-b:a', '96k'
             ])
         else:
             cmd.extend([
@@ -1107,7 +1107,7 @@ class MergeApp(TkinterDnD.Tk):
                 '-map', '0:a:0',
                 '-c:v', 'copy',
                 '-c:a:0', 'aac', '-aac_coder', 'twoloop',
-                '-b:a:0', '192k',
+                '-b:a:0', '96k',
                 '-c:a:1', 'copy'
             ])
         
@@ -1325,10 +1325,10 @@ class MergeApp(TkinterDnD.Tk):
             f'[0:a:{original_track}]volume={orig_vol}[a0];'
             f'[0:a:{translation_track}]volume={new_vol}[a1];'
             f'[a0][a1]amix=inputs=2:duration=first:dropout_transition=2[a_mix]',
-            '-map', '0:v:0',  # Видео
-            '-map', '[a_mix]',  # Смешанная дорожка
-            '-c:v', 'copy',  # Копируем видео без перекодировки
-            '-c:a', 'aac',  # Кодируем смешанную дорожку в AAC
+            '-map', '0:v:0', 
+            '-map', '[a_mix]', 
+            '-c:v', 'copy', 
+            '-c:a', 'aac', 
             '-strict', 'experimental',
             '-y', output
         ]
@@ -1409,7 +1409,7 @@ class MergeApp(TkinterDnD.Tk):
                 '-map', '[a_mix]',
                 '-c:v', 'copy',
                 '-c:a', 'aac', '-aac_coder', 'twoloop',
-                '-b:a', '192k'
+                '-b:a', '96k'
             ])
         else:
             cmd.extend([
@@ -1418,7 +1418,7 @@ class MergeApp(TkinterDnD.Tk):
                 '-map', f'0:a:{orig_track["audio_index"]}',
                 '-c:v', 'copy',
                 '-c:a:0', 'aac', '-aac_coder', 'twoloop',
-                '-b:a:0', '192k',
+                '-b:a:0', '96k',
                 '-c:a:1', 'copy'
             ])
         
