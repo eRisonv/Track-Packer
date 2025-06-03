@@ -91,7 +91,7 @@ class MergeApp(TkinterDnD.Tk):
             self.iconbitmap(resource_path('hey.ico'))
         except:
             pass
-        self.version = "1.2.5"
+        self.version = "1.2.6"
         self.title(f"Track-Packer")
         self.animation_phases = ['⏳', '⌛']
         self.show_console = tk.BooleanVar(value=False)
@@ -911,25 +911,16 @@ class MergeApp(TkinterDnD.Tk):
 
     def get_base_name(self, path):
         name = os.path.basename(path)
-        # Удаляем ведущие цифры с подчеркиванием
-        name = re.sub(r'^\d+_', '', name)
-        # Удаляем языковые суффиксы (_rus, _eng и т.д.)
         name = re.sub(r'_(rus|eng|audio|track)(?=\.[^.]+$)', '', name, flags=re.IGNORECASE)
-        # Удаляем все, что в скобках
         name = re.sub(r'\([^)]*\)', '', name)
-        # Заменяем множественные подчеркивания на одно
         name = re.sub(r'_+', '_', name)
-        # Заменяем множественные точки на одну (кроме расширения)
         base, ext = os.path.splitext(name)
         base = re.sub(r'\.+', '.', base)
         name = base + ext
-        # Приводим к нижнему регистру и удаляем расширение
         return os.path.splitext(name.lower())[0]
 
     def is_similar_name(self, name1, name2):
-        # Приводим к нижнему регистру
-        name1 = name1.lower()
-        name2 = name2.lower()
+        return name1 == name2
         
         # Удаляем все небуквенно-цифровые символы
         name1 = re.sub(r'[^a-z0-9]', '', name1)
