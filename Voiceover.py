@@ -51,7 +51,7 @@ def minimize_console():
         user32.ShowWindow(hwnd, 6)
 
 video_ext = ['.flv', '.mp4', '.avi', '.mov', '.mkv', '.m4v']
-audio_ext = ['.mp3', '.wav', '.flac']
+audio_ext = ['.mp3', '.wav', '.flac', '.aac']
 
 class ToolTip:
     def __init__(self, widget, text):
@@ -91,7 +91,7 @@ class MergeApp(TkinterDnD.Tk):
             self.iconbitmap(resource_path('hey.ico'))
         except:
             pass
-        self.version = "1.2"
+        self.version = "1.2.5"
         self.title(f"Track-Packer")
         self.animation_phases = ['⏳', '⌛']
         self.show_console = tk.BooleanVar(value=False)
@@ -125,8 +125,8 @@ class MergeApp(TkinterDnD.Tk):
         self.created_files = []
         self.skipped_files = []
         self.all_files = {'video': [], 'audio': []}
-        self.orig_volume = tk.DoubleVar(value=5)
-        self.new_volume = tk.DoubleVar(value=100)
+        self.orig_volume = tk.DoubleVar(value=load_from_registry("orig_volume", 5))
+        self.new_volume = tk.DoubleVar(value=load_from_registry("new_volume", 100))
         self.remove_source = tk.BooleanVar(value=False)
         self.invert_tracks = tk.BooleanVar(value=False)
         self.is_processing = False
