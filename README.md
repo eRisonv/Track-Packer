@@ -33,3 +33,4 @@ Super_video_tutor_rus.mp3
 video = flv,mp4,avi,mov,mkv,m4v
 audio = mp3,wav,flac
 ```
+Для компиляции исходников вам потребуется скачать ffmpeg
