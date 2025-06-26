@@ -31,5 +31,6 @@ Super_video_tutor_rus.mp3
 **Поддерживаемые форматы:**
 
 video = flv,mp4,avi,mov,mkv,m4v
-audio = mp3,wav,flac
+audio = mp3,wav,flac, aac
 ```
+Для компиляции исходников вам потребуется скачать ffmpeg
