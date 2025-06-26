@@ -919,15 +919,15 @@ class MergeApp(TkinterDnD.Tk):
         name = base + ext
         return os.path.splitext(name.lower())[0]
 
-    def is_similar_name(self, name1, name2):
-        return name1 == name2
-        
-        # Удаляем все небуквенно-цифровые символы
-        name1 = re.sub(r'[^a-z0-9]', '', name1)
-        name2 = re.sub(r'[^a-z0-9]', '', name2)
-        
-        # Считаем похожими, если одно имя содержится в другом
-        return name1 in name2 or name2 in name1
+    def normalize_name(self, name):
+        """Нормализует имя файла, удаляя не буквенно-цифровые символы и приводя к нижнему регистру."""
+        return re.sub(r'[^a-z0-9]', '', name.lower())
+
+    def is_similar_name(self, video_base, audio_base):
+        """Проверяет, содержится ли нормализованное имя видео в нормализованном имени аудио."""
+        norm_video = self.normalize_name(video_base)
+        norm_audio = self.normalize_name(audio_base)
+        return norm_video in norm_audio
 
     def update_treeview(self):
         self.tree.delete(*self.tree.get_children())  # Очищаем Treeview
