@@ -91,7 +91,7 @@ class MergeApp(TkinterDnD.Tk):
             self.iconbitmap(resource_path('hey.ico'))
         except:
             pass
-        self.version = "1.2.6"
+        self.version = "1.2.8"
         self.title(f"Track-Packer")
         self.animation_phases = ['⏳', '⌛']
         self.show_console = tk.BooleanVar(value=False)
@@ -1048,10 +1048,9 @@ class MergeApp(TkinterDnD.Tk):
                 if pair['audio']:
                     current_files.append(pair['audio'])
                 if self.backup_files.get():
-                    if self.remove_source.get():
-                        self.remove_source_files(current_files)
-                    else:
-                        self.create_backup_files(current_files)
+                    self.create_backup_files(current_files)
+                else:
+                    self.remove_source_files(current_files)
                 self.created_files.extend(current_files)
         
         except Exception as e:
@@ -1224,17 +1223,13 @@ class MergeApp(TkinterDnD.Tk):
                 if not self.stop_event.is_set():
                     shutil.move(temp_output_path, output_path)
                     self.update_item_status(base, 'done')
-                    # Создаем список файлов для backup только для текущей задачи
                     current_files = [pair['video']]
                     if pair['audio']:
                         current_files.append(pair['audio'])
-                    # Выполняем backup, если включена опция
                     if self.backup_files.get():
-                        if self.remove_source.get():
-                            self.remove_source_files(current_files)
-                        else:
-                            self.create_backup_files(current_files)
-                    self.created_files.extend(current_files)
+                        self.create_backup_files(current_files)
+                    else:
+                        self.remove_source_files(current_files)
             
             except Exception as e:
                 print(f"Ошибка при обработке {pair['video']}: {str(e)}")
@@ -1551,15 +1546,6 @@ class MergeApp(TkinterDnD.Tk):
             except Exception as e:
                 print(f"Ошибка перемещения {f}: {str(e)}")
 
-def remove_source_files(self, files):
-    for f in files:
-        try:
-            if os.path.exists(f):
-                os.remove(f)
-                print(f"Файл удален: {f}")
-        except Exception as e:
-            print(f"Ошибка удаления {f}: {str(e)}")
-            
     def remove_source_files(self, files):
         for f in files:
             try:
@@ -1568,6 +1554,15 @@ def remove_source_files(self, files):
                     print(f"Файл удален: {f}")
             except Exception as e:
                 print(f"Ошибка удаления {f}: {str(e)}")
+        # Remove backup folder if it exists
+        for f in files:
+            backup_dir = os.path.join(os.path.dirname(f), "backup")
+            if os.path.exists(backup_dir):
+                try:
+                    shutil.rmtree(backup_dir)
+                    print(f"Папка backup удалена: {backup_dir}")
+                except Exception as e:
+                    print(f"Ошибка удаления папки backup {backup_dir}: {str(e)}")
 
     def backup_files(self):
         """
