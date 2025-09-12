@@ -91,7 +91,7 @@ class MergeApp(TkinterDnD.Tk):
             self.iconbitmap(resource_path('hey.ico'))
         except:
             pass
-        self.version = "1.2.8"
+        self.version = "1.3.0"
         self.title(f"Track-Packer")
         self.animation_phases = ['⏳', '⌛']
         self.show_console = tk.BooleanVar(value=False)
