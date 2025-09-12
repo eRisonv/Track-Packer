@@ -110,8 +110,8 @@ class MergeApp(TkinterDnD.Tk):
         self.after_id = None
         self.stop_event = None
         self.active_ffmpeg_processes = []
-        self.geometry("370x520")
-        self.minsize(370, 520)
+        self.geometry("370x440")
+        self.minsize(370, 440)
         self.attributes('-topmost', 1)
         self.after(2000, lambda: self.attributes('-topmost', 0))
         self.center_window()
@@ -260,7 +260,7 @@ class MergeApp(TkinterDnD.Tk):
         main_frame.grid_columnconfigure(0, weight=1)
         main_frame.grid_columnconfigure(1, weight=0)
 
-        self.drop_area = tk.Canvas(main_frame, bg="#e8f4ff", bd=2, relief=tk.RIDGE, height=100)
+        self.drop_area = tk.Canvas(main_frame, bg="#e8f4ff", bd=2, relief=tk.RIDGE, height=80)
         self.drop_area.grid(row=0, column=0, columnspan=2, sticky="nsew", pady=2)
         self.drop_area.bind("<Configure>", self.update_drop_area_text)
         self.drop_area.bind("<Button-1>", self.on_click)
@@ -270,7 +270,7 @@ class MergeApp(TkinterDnD.Tk):
         file_frame.grid_columnconfigure(0, weight=1)
         file_frame.grid_rowconfigure(0, weight=1)
 
-        self.tree = ttk.Treeview(file_frame, columns=('status', 'video', 'audio'), show='headings')
+        self.tree = ttk.Treeview(file_frame, columns=('status', 'video', 'audio'), show='headings', height=6)
         self.tree.heading('status', text='Статус', anchor=tk.CENTER)
         self.tree.heading('video', text='Видео')
         self.tree.heading('audio', text='Аудио')
@@ -286,6 +286,7 @@ class MergeApp(TkinterDnD.Tk):
         hsb.grid(row=1, column=0, sticky="ew")
 
         self.tree.bind("<Delete>", self.delete_selected_items)
+        self.tree.bind("<<TreeviewSelect>>", self.on_treeview_select)
 
         button_frame = ttk.Frame(main_frame)
         button_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=2)
@@ -307,8 +308,13 @@ class MergeApp(TkinterDnD.Tk):
                                       command=self.clear_list)
         self.clear_button.pack(side=tk.RIGHT, padx=5)
 
-        volume_frame = ttk.Frame(main_frame)
-        volume_frame.grid(row=3, column=0, sticky="ew", pady=2)
+        # Объединяем volume_frame и target_track_frame в один блок
+        controls_frame = ttk.Frame(main_frame)
+        controls_frame.grid(row=3, column=0, sticky="ew", pady=2)
+        controls_frame.columnconfigure(0, weight=1)
+
+        volume_frame = ttk.Frame(controls_frame)
+        volume_frame.grid(row=0, column=0, sticky="ew")
         volume_frame.columnconfigure(1, weight=1)
 
         self.orig_frame = ttk.Frame(volume_frame)
@@ -329,6 +335,15 @@ class MergeApp(TkinterDnD.Tk):
         self.new_label = tk.Label(self.new_frame, text="100%", width=5)
         self.new_label.grid(row=0, column=2, padx=5, sticky='e')
 
+        # Target track selector - ИСПРАВЛЕНО: используем grid вместо pack
+        self.target_track_frame = ttk.Frame(volume_frame)
+        self.target_track_frame.grid(row=2, column=0, sticky="ew", pady=(5, 0))  # Уменьшен отступ
+        self.target_track_frame.columnconfigure(1, weight=1)
+        
+        self.target_track = tk.IntVar(value=1)
+        self.target_track_frame.grid_remove()
+
+        # Кнопка GO остается справа
         self.merge_button = tk.Button(main_frame, text="GO", bg="#4CAF50", fg="white",
                                      command=self.toggle_processing, relief=tk.FLAT, cursor="hand2",
                                      font=("Arial", 12, "bold"), width=8, height=2)
@@ -360,33 +375,119 @@ class MergeApp(TkinterDnD.Tk):
         )
         self.progress_label.place(in_=self.progress_bar, relx=0.5, rely=0.5, anchor="center")
 
+        # ИСПРАВЛЕНО: Нижняя панель с чекбоксами - используем grid для лучшего выравнивания
         bottom_frame = ttk.Frame(main_frame)
         bottom_frame.grid(row=5, column=0, columnspan=2, sticky="ew", pady=1)
+        bottom_frame.columnconfigure(0, weight=1)
+        bottom_frame.columnconfigure(1, weight=1)
+        bottom_frame.columnconfigure(2, weight=1)
+        bottom_frame.columnconfigure(3, weight=0)  # Для версии
 
-        # Чекбокс "Del Original" с тултипом
-        delete_original_checkbox = ttk.Checkbutton(bottom_frame, text="Del Original", variable=self.delete_original_track)
-        delete_original_checkbox.pack(side=tk.LEFT, padx=5)
+        # ИСПРАВЛЕНО: Используем grid для равномерного размещения чекбоксов в одну строку
+        delete_original_checkbox = ttk.Checkbutton(bottom_frame, text="Del Original", 
+                                                   variable=self.delete_original_track)
+        delete_original_checkbox.grid(row=0, column=0, sticky='w', padx=5)
         ToolTip(delete_original_checkbox, "Удаляет оригинальные аудиодорожки из выходного файла.\nЕсли не выбрано, оригинальные дорожки сохраняются.")
 
-        # Чекбокс "Backup" с тултипом
         backup_checkbox = ttk.Checkbutton(bottom_frame, text="Backup", variable=self.backup_files)
-        backup_checkbox.pack(side=tk.LEFT, padx=5)
+        backup_checkbox.grid(row=0, column=1, sticky='w', padx=5)
         ToolTip(backup_checkbox, "Создает резервные копии оригинальных файлов в папке 'backup'.")
 
-        # Чекбокс "Console" с тултипом
-        console_checkbox = ttk.Checkbutton(bottom_frame, text="Console", variable=self.show_console, command=self.toggle_console)
-        console_checkbox.pack(side=tk.LEFT, padx=5)
+        console_checkbox = ttk.Checkbutton(bottom_frame, text="Console", 
+                                           variable=self.show_console, command=self.toggle_console)
+        console_checkbox.grid(row=0, column=2, sticky='w', padx=5)
         ToolTip(console_checkbox, "Отображать консоль ffmpeg.")
 
-        # Лейбл версии
-        version_label = ttk.Label(bottom_frame, text=f"Version: {self.version}", anchor="e")
-        version_label.pack(side=tk.RIGHT, padx=5)
+        version_label = ttk.Label(bottom_frame, text=f"Version: {self.version}")
+        version_label.grid(row=0, column=3, sticky='e', padx=5)
 
         self.tree.tag_configure('pending', foreground='gray')
         self.tree.tag_configure('processing', foreground='orange')
         self.tree.tag_configure('done', foreground='green')
         self.tree.tag_configure('error', foreground='red')
         self.tree.tag_configure('stopped', foreground='blue')
+
+    def on_treeview_select(self, event=None):
+        """ИСПРАВЛЕНО: Обработчик выбора элемента в списке для показа/скрытия выбора целевой дорожки"""
+        selected = self.tree.selection()
+        
+        if not selected:
+            # Скрываем фрейм если ничего не выбрано
+            self.target_track_frame.grid_remove()
+            return
+        
+        item = selected[0]
+        values = self.tree.item(item, 'values')
+        base = self.get_base_name(values[1])
+        pair = self.file_pairs.get(base)
+        
+        if not pair or not pair.get('video'):
+            self.target_track_frame.grid_remove()
+            return
+        
+        # Проверяем есть ли внешний аудио файл
+        has_external_audio = pair.get('audio') is not None
+        
+        if has_external_audio:
+            # Получаем информацию о внутренних дорожках
+            track_info = pair.get('track_info')
+            if not track_info:
+                track_count, track_info = self.check_audio_tracks(pair['video'])
+                pair['track_info'] = track_info
+            
+            audio_tracks = len(track_info)
+            
+            if audio_tracks > 1:
+                # Показываем выбор целевой дорожки
+                self.show_target_track_selector(track_info)
+            else:
+                # Скрываем если только одна дорожка
+                self.target_track_frame.grid_remove()
+        else:
+            # Скрываем если нет внешнего аудио
+            self.target_track_frame.grid_remove()
+
+    def show_target_track_selector(self, track_info):
+        """ИСПРАВЛЕНО: Показывает селектор целевой дорожки с правильным выравниванием"""
+        # Очищаем фрейм
+        for widget in self.target_track_frame.winfo_children():
+            widget.destroy()
+        
+        # Добавляем лейбл
+        ttk.Label(self.target_track_frame, text="Target Track:").grid(row=0, column=0, sticky='w', padx=(0, 10))
+        
+        # ИСПРАВЛЕНО: Создаем фрейм для радиокнопок с использованием grid
+        button_frame = ttk.Frame(self.target_track_frame)
+        button_frame.grid(row=0, column=1, sticky='ew')
+        button_frame.columnconfigure(0, weight=1)  # Позволяем растягиваться
+        
+        # ИСПРАВЛЕНО: Размещаем радиокнопки горизонтально с помощью grid
+        for i, track in enumerate(track_info):
+            lang = track.get('language', 'und').upper()
+            track_index = track.get('track_index', i)
+            
+            # Определяем текст для радиокнопки
+            if lang == 'ENG':
+                text = f"{track_index} (ENG)"
+            elif lang == 'RUS':
+                text = f"{track_index} (RUS)"
+            else:
+                text = f"{track_index} ({lang})"
+            
+            radio = ttk.Radiobutton(
+                button_frame, 
+                text=text, 
+                variable=self.target_track,
+                value=i  # Используем индекс в массиве track_info
+            )
+            radio.grid(row=0, column=i, sticky='w', padx=5)  # ИСПРАВЛЕНО: используем grid
+            
+            # Добавляем тултип с подробной информацией
+            tooltip_text = f"Дорожка #{track_index}: {lang}\n{track.get('full_info', '')[:60]}..."
+            ToolTip(radio, tooltip_text)
+        
+        # Показываем фрейм
+        self.target_track_frame.grid()
 
     def minimize_console(self):
         if not self.show_console.get():
@@ -441,6 +542,7 @@ class MergeApp(TkinterDnD.Tk):
             self.start_preview()
 
     def start_preview(self):
+        """Модифицированная версия предпросмотра с учетом выбранной дорожки"""
         if self.is_preview_playing:
             return
 
@@ -468,26 +570,35 @@ class MergeApp(TkinterDnD.Tk):
             ffplay_path = resource_path("ffplay.exe")
 
             if audio_path:
-                # Case 1: External audio file provided
+                # Получаем целевую дорожку для смешивания
+                track_info = pair.get('track_info', [])
+                if track_info and len(track_info) > 1:
+                    target_track_index = self.target_track.get()
+                    if target_track_index < len(track_info):
+                        target_audio_index = track_info[target_track_index]['audio_index']
+                    else:
+                        target_audio_index = 0
+                else:
+                    target_audio_index = 0
+                
                 cmd = [
                     ffmpeg_path,
                     '-i', video_path,
                     '-i', audio_path,
                     '-filter_complex',
-                    f'[0:a]volume={orig_vol}[a0];[1:a]volume={new_vol}[a1];[a0][a1]amix=duration=shortest[a]',
+                    f'[0:a:{target_audio_index}]volume={orig_vol}[a0];[1:a]volume={new_vol}[a1];[a0][a1]amix=duration=shortest[a]',
                     '-map', '[a]',
-                    '-t', '30',  # Limit to 30 seconds
+                    '-t', '30',
                     '-f', 'wav',
                     '-'
                 ]
             else:
-                # Case 2: Using internal audio tracks
+                # Используем внутренние дорожки как обычно
                 track_info = pair.get('track_info', [])
                 if len(track_info) < 2:
                     tk.messagebox.showerror("Ошибка", "Недостаточно дорожек для микса")
                     return
 
-                # Find tracks by language or default to first two
                 eng_track = next((t for t in track_info if t['language'] == 'eng'), None)
                 rus_track = next((t for t in track_info if t['language'] == 'rus'), None)
 
@@ -495,11 +606,9 @@ class MergeApp(TkinterDnD.Tk):
                     track1 = eng_track['audio_index']
                     track2 = rus_track['audio_index']
                 else:
-                    # Default to first two tracks if languages not identified
                     track1 = track_info[0]['audio_index']
                     track2 = track_info[1]['audio_index']
 
-                # Handle track inversion
                 if self.invert_tracks.get():
                     track1, track2 = track2, track1
 
@@ -516,8 +625,8 @@ class MergeApp(TkinterDnD.Tk):
 
             ffplay_cmd = [
                 ffplay_path,
-                '-nodisp',    # Hide window
-                '-autoexit',  # Close after finishing
+                '-nodisp',
+                '-autoexit',
                 '-'
             ]
 
@@ -537,9 +646,8 @@ class MergeApp(TkinterDnD.Tk):
             )
 
             self.is_preview_playing = True
-            self.preview_button.config(text=self.pause_icon_text)  # Show pause icon
+            self.preview_button.config(text=self.pause_icon_text)
 
-            # Start monitoring in separate thread
             threading.Thread(target=self.wait_for_preview, daemon=True).start()
 
         except Exception as e:
@@ -1068,18 +1176,41 @@ class MergeApp(TkinterDnD.Tk):
             ])
 
     def run_ffmpeg_external(self, video, audio, output):
+        """Модифицированная версия для работы с выбранной целевой дорожкой"""
         ffmpeg_path = resource_path("ffmpeg.exe")
         if not os.path.exists(ffmpeg_path):
             raise FileNotFoundError(f"FFmpeg не найден: {ffmpeg_path}")
+        
         orig_vol = self.orig_volume.get() / 100
         new_vol = self.new_volume.get() / 100
+        
+        # Получаем информацию о выбранном файле
+        selected = self.tree.selection()
+        if selected:
+            item = selected[0]
+            values = self.tree.item(item, 'values')
+            base = self.get_base_name(values[1])
+            pair = self.file_pairs.get(base)
+            track_info = pair.get('track_info', [])
+            
+            # Определяем целевую дорожку
+            if track_info and len(track_info) > 1:
+                target_track_index = self.target_track.get()
+                if target_track_index < len(track_info):
+                    target_audio_index = track_info[target_track_index]['audio_index']
+                else:
+                    target_audio_index = 0  # Fallback к первой дорожке
+            else:
+                target_audio_index = 0
+        else:
+            target_audio_index = 0
         
         cmd = [
             ffmpeg_path,
             '-i', video,
             '-i', audio,
             '-filter_complex',
-            f'[0:a:0]volume={orig_vol}[a0];[1:a]volume={new_vol}[a1];[a0][a1]amix=inputs=2:duration=first:dropout_transition=2[a_mix]',
+            f'[0:a:{target_audio_index}]volume={orig_vol}[a0];[1:a]volume={new_vol}[a1];[a0][a1]amix=inputs=2:duration=first:dropout_transition=2[a_mix]',
         ]
         
         if self.delete_original_track.get():
@@ -1094,7 +1225,7 @@ class MergeApp(TkinterDnD.Tk):
             cmd.extend([
                 '-map', '0:v:0',
                 '-map', '[a_mix]',
-                '-map', '0:a:0',
+                '-map', f'0:a:{target_audio_index}',
                 '-c:v', 'copy',
                 '-c:a:0', 'aac', '-aac_coder', 'twoloop',
                 '-b:a:0', '96k',
@@ -1111,8 +1242,6 @@ class MergeApp(TkinterDnD.Tk):
             encoding='utf-8',
             errors='ignore'
         )
-        
-        threading.Thread(target=self.read_ffmpeg_logs, args=(process,), daemon=True).start()
         
         return process
         
