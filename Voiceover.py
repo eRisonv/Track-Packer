@@ -783,13 +783,9 @@ class MergeApp(TkinterDnD.Tk):
     def update_drop_area_text(self, event=None):
         width = self.drop_area.winfo_width()
         height = self.drop_area.winfo_height()
-        
         self.drop_area.delete("all")
-        self.drop_area.create_text(width // 2, height // 3, text="＋", 
-                                 fill="#0078d4", font=('Arial', 48))
-        self.drop_area.create_text(width // 2, height * 2 // 3, 
-                                 text="Перетащите файлы/папки сюда\nили кликните в это место чтобы выбрать вручную.",
-                                 fill="#666666", font=('Arial', 10), justify=tk.CENTER)
+        self.drop_area.create_text(width // 2, height // 4, text="＋", fill="#0078d4", font=('Arial', 48))
+        self.drop_area.create_text(width // 2, height * 2 // 3, text="Перетащите файлы/папки сюда\nили кликните в это место чтобы выбрать вручную.", fill="#666666", font=('Arial', 10), justify=tk.CENTER)
 
     def setup_volume_labels(self):
         # Настройка шрифта для "ссылок"
@@ -1028,14 +1024,68 @@ class MergeApp(TkinterDnD.Tk):
         return os.path.splitext(name.lower())[0]
 
     def normalize_name(self, name):
-        """Нормализует имя файла, удаляя не буквенно-цифровые символы и приводя к нижнему регистру."""
-        return re.sub(r'[^a-z0-9]', '', name.lower())
+        """Улучшенная нормализация имени файла с обработкой числовых префиксов"""
+        # Удаляем расширение
+        name = os.path.splitext(name)[0].lower()
+        
+        # Удаляем числовые префиксы в начале (1., 01, 09, etc.)
+        name = re.sub(r'^\d+[\.\s]*', '', name)
+        
+        # Удаляем суффиксы языков и типов
+        name = re.sub(r'[_\-\s]*(rus|eng|audio|track|russian|english)(?=\s|$)', '', name, flags=re.IGNORECASE)
+        
+        # Удаляем содержимое в скобках и квадратных скобках
+        name = re.sub(r'[\(\[\{].*?[\)\]\}]', '', name)
+        
+        # Удаляем лишние пробелы и знаки препинания
+        name = re.sub(r'[^\w\s]', ' ', name)
+        name = re.sub(r'\s+', ' ', name).strip()
+        
+        # Приводим к единому формату (только буквы и цифры)
+        normalized = re.sub(r'[^a-z0-9]', '', name)
+        
+        return normalized
 
     def is_similar_name(self, video_base, audio_base):
-        """Проверяет, содержится ли нормализованное имя видео в нормализованном имени аудио."""
+        """Улучшенная функция сравнения имен с несколькими методами"""
+        import difflib
+        
         norm_video = self.normalize_name(video_base)
         norm_audio = self.normalize_name(audio_base)
-        return norm_video in norm_audio
+        
+        # Метод 1: Прямое вхождение (оригинальный)
+        if norm_video and norm_audio:
+            if norm_video in norm_audio or norm_audio in norm_video:
+                return True
+        
+        # Метод 2: Сравнение по коэффициенту подобия
+        if len(norm_video) > 3 and len(norm_audio) > 3:
+            similarity = difflib.SequenceMatcher(None, norm_video, norm_audio).ratio()
+            if similarity >= 0.8:  # 80% схожесть
+                return True
+        
+        # Метод 3: Альтернативная нормализация для цифровых префиксов
+        def extract_core_name(name):
+            """Извлекает основное имя без префиксов и суффиксов"""
+            # Убираем числовые префиксы
+            clean = re.sub(r'^\d+[\.\s\-_]*', '', name.lower())
+            # Убираем языковые суффиксы
+            clean = re.sub(r'[_\-\s]*(rus|eng|audio|track).*$', '', clean, flags=re.IGNORECASE)
+            # Убираем расширение
+            clean = os.path.splitext(clean)[0]
+            # Нормализуем пробелы
+            clean = re.sub(r'\s+', ' ', clean.strip())
+            return clean
+        
+        video_core = extract_core_name(video_base)
+        audio_core = extract_core_name(audio_base)
+        
+        if video_core and audio_core and len(video_core) > 3 and len(audio_core) > 3:
+            core_similarity = difflib.SequenceMatcher(None, video_core, audio_core).ratio()
+            if core_similarity >= 0.85:  # 85% схожесть для основных имен
+                return True
+        
+        return False
 
     def update_treeview(self):
         self.tree.delete(*self.tree.get_children())  # Очищаем Treeview
